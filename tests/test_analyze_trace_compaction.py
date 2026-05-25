@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import json
+import re
 
-from scripts.analyze_trace_compaction import analyze_paths, result_to_dict
+from claude_tap.viewer import _generate_html_viewer
+from scripts.analyze_trace_compaction import (
+    analyze_paths,
+    compact_jsonl,
+    load_jsonl_records,
+    restore_compact_jsonl,
+    result_to_dict,
+    write_jsonl_records,
+)
 
 
 def _write_jsonl(path, records: list[dict]) -> None:
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
+def _normalize_generated_html(html: str) -> str:
+    html = re.sub(r'const __TRACE_JSONL_PATH__ = ".*?";', 'const __TRACE_JSONL_PATH__ = "<trace>";', html)
+    return re.sub(r'const __TRACE_HTML_PATH__ = ".*?";', 'const __TRACE_HTML_PATH__ = "<html>";', html)
 
 
 def test_analyze_paths_estimates_input_prefix_savings(tmp_path) -> None:
@@ -67,3 +81,69 @@ def test_result_to_dict_reports_top_savings(tmp_path) -> None:
     assert payload["files"] == 1
     assert payload["top_savings"][0]["field"] == "request.body.messages"
     assert payload["top_savings"][0]["prefix_items"] == 1
+    assert payload["context_field_bytes"] > 0
+    assert payload["prefix_candidate_bytes"] > 0
+
+
+def test_compact_restore_round_trip_keeps_exported_html_equivalent(tmp_path) -> None:
+    original_trace = tmp_path / "original.jsonl"
+    compact_trace = tmp_path / "compact.jsonl"
+    restored_trace = tmp_path / "restored.jsonl"
+    original_html = tmp_path / "original.html"
+    restored_html = tmp_path / "restored.html"
+
+    first = {
+        "role": "user",
+        "content": [{"type": "text", "text": "Please inspect the trace history. " + "shared context " * 80}],
+    }
+    second = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "I inspected the first batch."}],
+    }
+    third = {
+        "role": "user",
+        "content": [{"type": "text", "text": "Continue with the next batch."}],
+    }
+    records = [
+        {
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {"model": "claude-test", "messages": [first]},
+            },
+            "response": {"status": 200, "body": {"content": [{"type": "text", "text": "First response"}]}},
+        },
+        {
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {"model": "claude-test", "messages": [first, second]},
+            },
+            "response": {"status": 200, "body": {"content": [{"type": "text", "text": "Second response"}]}},
+        },
+        {
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {"model": "claude-test", "messages": [first, second, third]},
+            },
+            "response": {"status": 200, "body": {"content": [{"type": "text", "text": "Third response"}]}},
+        },
+    ]
+    write_jsonl_records(original_trace, records)
+
+    compact_jsonl(original_trace, compact_trace)
+    restore_compact_jsonl(compact_trace, restored_trace)
+
+    compacted_records = load_jsonl_records(compact_trace)
+    assert compact_trace.stat().st_size < original_trace.stat().st_size
+    assert compacted_records[1]["request"]["body"]["messages"]["$prefix_len"] == 1
+    assert compacted_records[2]["request"]["body"]["messages"]["$prefix_len"] == 2
+    assert load_jsonl_records(restored_trace) == load_jsonl_records(original_trace)
+
+    _generate_html_viewer(original_trace, original_html)
+    _generate_html_viewer(restored_trace, restored_html)
+
+    assert _normalize_generated_html(restored_html.read_text(encoding="utf-8")) == _normalize_generated_html(
+        original_html.read_text(encoding="utf-8")
+    )
