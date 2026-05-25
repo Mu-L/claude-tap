@@ -11,9 +11,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from claude_tap.usage import normalize_usage
+
 CONTEXT_FIELDS = (
     ("request", "body", "messages"),
     ("request", "body", "input"),
+)
+
+RESPONSE_BODY_FIELD = ("response", "body")
+SSE_EVENTS_FIELD = ("response", "sse_events")
+WS_EVENTS_FIELD = ("response", "ws_events")
+TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
 )
 
 
@@ -41,6 +53,15 @@ class AnalysisResult:
     raw_bytes: int = 0
     canonical_record_bytes: int = 0
     estimated_compact_bytes: int = 0
+    response_body_bytes: int = 0
+    sse_events_bytes: int = 0
+    ws_events_bytes: int = 0
+    image_base64_bytes: int = 0
+    usage_records: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     context_field_bytes: int = 0
     prefix_candidate_fields: int = 0
     prefix_candidate_bytes: int = 0
@@ -88,6 +109,26 @@ class AnalysisResult:
     def non_context_bytes(self) -> int:
         return max(0, self.canonical_record_bytes - self.context_field_bytes)
 
+    @property
+    def known_breakdown_bytes(self) -> int:
+        return self.context_field_bytes + self.response_body_bytes + self.sse_events_bytes + self.ws_events_bytes
+
+    @property
+    def other_bytes(self) -> int:
+        return max(0, self.canonical_record_bytes - self.known_breakdown_bytes)
+
+    @property
+    def total_observed_input_tokens(self) -> int:
+        return self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens
+
+    @property
+    def cache_read_share_percent(self) -> float:
+        return percent(self.cache_read_input_tokens, self.total_observed_input_tokens)
+
+    @property
+    def cache_read_vs_input_percent(self) -> float:
+        return percent(self.cache_read_input_tokens, self.input_tokens)
+
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -95,6 +136,12 @@ def canonical_json(value: Any) -> str:
 
 def encoded_size(value: Any) -> int:
     return len(canonical_json(value).encode("utf-8"))
+
+
+def percent(part: int, total: int) -> float:
+    if total == 0:
+        return 0.0
+    return part / total * 100
 
 
 def get_nested(root: Any, path: tuple[str, ...]) -> Any:
@@ -142,6 +189,79 @@ def set_nested(root: Any, path: tuple[str, ...], value: Any) -> bool:
         return False
     current[path[-1]] = value
     return True
+
+
+def image_base64_payload_bytes(value: Any) -> int:
+    total = 0
+    if isinstance(value, dict):
+        source = value.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            data = source.get("data")
+            if isinstance(data, str):
+                total += len(data.encode("utf-8"))
+        for child in value.values():
+            total += image_base64_payload_bytes(child)
+    elif isinstance(value, list):
+        for child in value:
+            total += image_base64_payload_bytes(child)
+    return total
+
+
+def event_payload(event: Any) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    payload = event.get("data", event)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def usage_from_event(event: Any) -> dict[str, Any]:
+    payload = event_payload(event)
+    if not payload:
+        return {}
+    response = payload.get("response")
+    if isinstance(response, dict):
+        usage = normalize_usage(response.get("usage") or response.get("usageMetadata"))
+        if has_token_usage(usage):
+            return usage
+    usage = normalize_usage(payload.get("usage") or payload.get("usageMetadata"))
+    return usage if has_token_usage(usage) else {}
+
+
+def record_usage(record: dict[str, Any]) -> dict[str, Any]:
+    body = get_nested(record, RESPONSE_BODY_FIELD)
+    if isinstance(body, dict):
+        usage = normalize_usage(body.get("usage") or body.get("usageMetadata") or body)
+        if has_token_usage(usage):
+            return usage
+
+    for event_field in (SSE_EVENTS_FIELD, WS_EVENTS_FIELD):
+        events = get_nested(record, event_field)
+        if not isinstance(events, list):
+            continue
+        for event in reversed(events):
+            usage = usage_from_event(event)
+            if usage:
+                return usage
+    return {}
+
+
+def has_token_usage(usage: dict[str, Any]) -> bool:
+    return any(key in usage for key in TOKEN_USAGE_KEYS)
+
+
+def token_count(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
 
 
 def load_jsonl_records(path: Path) -> list[dict[str, Any]]:
@@ -285,6 +405,23 @@ def analyze_file(path: Path, max_records: int | None = None) -> AnalysisResult:
             record_bytes = encoded_size(record)
             result.canonical_record_bytes += record_bytes
             compact_record_bytes = record_bytes
+            response_body = get_nested(record, RESPONSE_BODY_FIELD)
+            if response_body is not None:
+                result.response_body_bytes += encoded_size(response_body)
+            sse_events = get_nested(record, SSE_EVENTS_FIELD)
+            if isinstance(sse_events, list):
+                result.sse_events_bytes += encoded_size(sse_events)
+            ws_events = get_nested(record, WS_EVENTS_FIELD)
+            if isinstance(ws_events, list):
+                result.ws_events_bytes += encoded_size(ws_events)
+            result.image_base64_bytes += image_base64_payload_bytes(record)
+            usage = record_usage(record)
+            if usage:
+                result.usage_records += 1
+                result.input_tokens += token_count(usage.get("input_tokens"))
+                result.output_tokens += token_count(usage.get("output_tokens"))
+                result.cache_read_input_tokens += token_count(usage.get("cache_read_input_tokens"))
+                result.cache_creation_input_tokens += token_count(usage.get("cache_creation_input_tokens"))
 
             for field_path in CONTEXT_FIELDS:
                 value = get_nested(record, field_path)
@@ -341,6 +478,15 @@ def merge_results(results: list[AnalysisResult]) -> AnalysisResult:
         merged.raw_bytes += result.raw_bytes
         merged.canonical_record_bytes += result.canonical_record_bytes
         merged.estimated_compact_bytes += result.estimated_compact_bytes
+        merged.response_body_bytes += result.response_body_bytes
+        merged.sse_events_bytes += result.sse_events_bytes
+        merged.ws_events_bytes += result.ws_events_bytes
+        merged.image_base64_bytes += result.image_base64_bytes
+        merged.usage_records += result.usage_records
+        merged.input_tokens += result.input_tokens
+        merged.output_tokens += result.output_tokens
+        merged.cache_read_input_tokens += result.cache_read_input_tokens
+        merged.cache_creation_input_tokens += result.cache_creation_input_tokens
         merged.context_field_bytes += result.context_field_bytes
         merged.prefix_candidate_fields += result.prefix_candidate_fields
         merged.prefix_candidate_bytes += result.prefix_candidate_bytes
@@ -375,8 +521,27 @@ def result_to_dict(result: AnalysisResult, top: int) -> dict[str, Any]:
         "raw_bytes": result.raw_bytes,
         "canonical_record_bytes": result.canonical_record_bytes,
         "estimated_compact_bytes": result.estimated_compact_bytes,
+        "response_body_bytes": result.response_body_bytes,
+        "response_body_percent": percent(result.response_body_bytes, result.canonical_record_bytes),
+        "sse_events_bytes": result.sse_events_bytes,
+        "sse_events_percent": percent(result.sse_events_bytes, result.canonical_record_bytes),
+        "ws_events_bytes": result.ws_events_bytes,
+        "ws_events_percent": percent(result.ws_events_bytes, result.canonical_record_bytes),
+        "image_base64_bytes": result.image_base64_bytes,
+        "image_base64_percent": percent(result.image_base64_bytes, result.canonical_record_bytes),
+        "usage_records": result.usage_records,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "cache_read_input_tokens": result.cache_read_input_tokens,
+        "cache_creation_input_tokens": result.cache_creation_input_tokens,
+        "total_observed_input_tokens": result.total_observed_input_tokens,
+        "cache_read_share_percent": result.cache_read_share_percent,
+        "cache_read_vs_input_percent": result.cache_read_vs_input_percent,
         "context_field_bytes": result.context_field_bytes,
         "non_context_bytes": result.non_context_bytes,
+        "known_breakdown_bytes": result.known_breakdown_bytes,
+        "other_bytes": result.other_bytes,
+        "other_percent": percent(result.other_bytes, result.canonical_record_bytes),
         "context_percent": result.context_percent,
         "prefix_candidate_fields": result.prefix_candidate_fields,
         "prefix_candidate_bytes": result.prefix_candidate_bytes,
@@ -416,6 +581,40 @@ def print_text_report(result: AnalysisResult, top: int) -> None:
     print(
         "Target context field bytes: "
         f"{format_bytes(result.context_field_bytes)} ({result.context_percent:.2f}% of canonical)"
+    )
+    print(
+        "Response body bytes: "
+        f"{format_bytes(result.response_body_bytes)} "
+        f"({percent(result.response_body_bytes, result.canonical_record_bytes):.2f}% of canonical)"
+    )
+    print(
+        "SSE event bytes: "
+        f"{format_bytes(result.sse_events_bytes)} "
+        f"({percent(result.sse_events_bytes, result.canonical_record_bytes):.2f}% of canonical)"
+    )
+    print(
+        "WebSocket event bytes: "
+        f"{format_bytes(result.ws_events_bytes)} "
+        f"({percent(result.ws_events_bytes, result.canonical_record_bytes):.2f}% of canonical)"
+    )
+    print(
+        "Image base64 payload bytes: "
+        f"{format_bytes(result.image_base64_bytes)} "
+        f"({percent(result.image_base64_bytes, result.canonical_record_bytes):.2f}% of canonical, overlapping)"
+    )
+    print(
+        "Token usage: "
+        f"records={result.usage_records} input={result.input_tokens:,} output={result.output_tokens:,} "
+        f"cache_read={result.cache_read_input_tokens:,} cache_create={result.cache_creation_input_tokens:,}"
+    )
+    print(
+        "Cache read ratio: "
+        f"{result.cache_read_share_percent:.2f}% of observed input token buckets, "
+        f"{result.cache_read_vs_input_percent:.2f}% vs reported input_tokens"
+    )
+    print(
+        "Approx other bytes: "
+        f"{format_bytes(result.other_bytes)} ({percent(result.other_bytes, result.canonical_record_bytes):.2f}% of canonical)"
     )
     print(f"Approx non-target bytes: {format_bytes(result.non_context_bytes)}")
     print(

@@ -85,6 +85,70 @@ def test_result_to_dict_reports_top_savings(tmp_path) -> None:
     assert payload["prefix_candidate_bytes"] > 0
 
 
+def test_analyze_paths_reports_payload_breakdown_and_cache_tokens(tmp_path) -> None:
+    trace = tmp_path / "trace_payloads.jsonl"
+    image_data = "abc123" * 20
+    _write_jsonl(
+        trace,
+        [
+            {
+                "request": {"body": {"messages": [{"role": "user", "content": "A"}]}},
+                "response": {
+                    "body": {
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": image_data},
+                            }
+                        ],
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 5,
+                            "cache_read_input_tokens": 80,
+                            "cache_creation_input_tokens": 10,
+                        },
+                    },
+                    "sse_events": [{"event": "message_delta", "data": {"usage": {"output_tokens": 5}}}],
+                    "ws_events": [{"type": "response.completed", "response": {"usage": {"input_tokens": 10}}}],
+                },
+            }
+        ],
+    )
+
+    payload = result_to_dict(analyze_paths([trace]), top=1)
+
+    assert payload["response_body_bytes"] > 0
+    assert payload["sse_events_bytes"] > 0
+    assert payload["ws_events_bytes"] > 0
+    assert payload["image_base64_bytes"] == len(image_data)
+    assert payload["usage_records"] == 1
+    assert payload["input_tokens"] == 100
+    assert payload["output_tokens"] == 5
+    assert payload["cache_read_input_tokens"] == 80
+    assert payload["cache_creation_input_tokens"] == 10
+    assert payload["total_observed_input_tokens"] == 190
+    assert payload["cache_read_share_percent"] > 40
+
+
+def test_analyze_paths_ignores_response_bodies_without_token_usage(tmp_path) -> None:
+    trace = tmp_path / "trace_no_usage.jsonl"
+    _write_jsonl(
+        trace,
+        [
+            {
+                "request": {"body": {"messages": [{"role": "user", "content": "A"}]}},
+                "response": {"body": {"id": "resp_1", "status": "completed", "output": []}},
+            }
+        ],
+    )
+
+    payload = result_to_dict(analyze_paths([trace]), top=1)
+
+    assert payload["usage_records"] == 0
+    assert payload["input_tokens"] == 0
+    assert payload["cache_read_input_tokens"] == 0
+
+
 def test_compact_restore_round_trip_keeps_exported_html_equivalent(tmp_path) -> None:
     original_trace = tmp_path / "original.jsonl"
     compact_trace = tmp_path / "compact.jsonl"
