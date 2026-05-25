@@ -25,6 +25,7 @@ import logging
 import time
 import uuid
 import zlib
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import aiohttp
@@ -49,12 +50,62 @@ from claude_tap.ws_proxy import (
 
 log = logging.getLogger("claude-tap")
 
+DEFAULT_TRACE_IGNORED_HOSTS = frozenset(
+    {
+        "registry.npmjs.org",
+        "registry.yarnpkg.com",
+        "registry.npmmirror.com",
+        "npm.pkg.github.com",
+    }
+)
+DEFAULT_TRACE_IGNORED_PATH_PREFIXES = ("/-/npm",)
+DEFAULT_TRACE_IGNORED_ARCHIVE_SUFFIXES = (".tgz", ".tar.gz", ".zip")
+DEFAULT_TRACE_IGNORED_BINARY_CONTENT_TYPES = frozenset(
+    {
+        "",
+        "application/gzip",
+        "application/octet-stream",
+        "application/x-gzip",
+        "application/x-tar",
+        "application/zip",
+        "binary/octet-stream",
+    }
+)
+
 
 def _matches_path_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
     clean = path.split("?", 1)[0].rstrip("/")
     return any(
         clean == prefix or clean.startswith(prefix + "/") or clean.startswith(prefix + ":") for prefix in prefixes
     )
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    if value := headers.get(name):
+        return value
+    lower_name = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lower_name:
+            return value
+    return ""
+
+
+def _should_skip_trace_record(upstream_url: str, path: str, response_headers: Mapping[str, str]) -> bool:
+    """Return whether a non-model upstream response should be forwarded without persisting."""
+    parsed = urlparse(upstream_url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname in DEFAULT_TRACE_IGNORED_HOSTS:
+        return True
+
+    clean_path = (path or parsed.path or "/").split("?", 1)[0].lower()
+    if _matches_path_prefix(clean_path, DEFAULT_TRACE_IGNORED_PATH_PREFIXES):
+        return True
+
+    media_type = _header_value(response_headers, "Content-Type").split(";", 1)[0].strip().lower()
+    if clean_path.endswith(DEFAULT_TRACE_IGNORED_ARCHIVE_SUFFIXES):
+        return media_type in DEFAULT_TRACE_IGNORED_BINARY_CONTENT_TYPES
+
+    return False
 
 
 async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
@@ -477,6 +528,7 @@ class ForwardProxyServer:
                 headers,
                 req_body,
                 log_prefix,
+                upstream_url,
             )
 
     async def _handle_streaming(
@@ -564,8 +616,15 @@ class ForwardProxyServer:
         req_headers: dict[str, str],
         req_body: dict | None,
         log_prefix: str,
+        upstream_url: str,
     ) -> None:
         """Handle a non-streaming response."""
+        if _should_skip_trace_record(upstream_url, path, upstream_resp.headers):
+            total_bytes = await self._relay_unrecorded_response(upstream_resp, client_writer)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            log.info(f"{log_prefix} <- {upstream_resp.status} ({duration_ms}ms, {total_bytes} bytes, trace skipped)")
+            return
+
         resp_bytes = await upstream_resp.read()
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -602,7 +661,14 @@ class ForwardProxyServer:
         )
         await self._writer.write(record)
 
-        # Send response to client
+        await self._send_buffered_response(upstream_resp, client_writer, resp_bytes)
+
+    async def _send_buffered_response(
+        self,
+        upstream_resp: aiohttp.ClientResponse,
+        client_writer: asyncio.StreamWriter,
+        resp_bytes: bytes,
+    ) -> None:
         status_line = f"HTTP/1.1 {upstream_resp.status} {upstream_resp.reason}\r\n"
         client_writer.write(status_line.encode())
         skip_headers = HOP_BY_HOP | {"content-length"}  # We set Content-Length ourselves
@@ -613,6 +679,40 @@ class ForwardProxyServer:
         client_writer.write(b"\r\n")
         client_writer.write(resp_bytes)
         await client_writer.drain()
+
+    async def _relay_unrecorded_response(
+        self,
+        upstream_resp: aiohttp.ClientResponse,
+        client_writer: asyncio.StreamWriter,
+    ) -> int:
+        status_line = f"HTTP/1.1 {upstream_resp.status} {upstream_resp.reason}\r\n"
+        client_writer.write(status_line.encode())
+        skip_headers = HOP_BY_HOP | {"content-length"}
+        content_length = _header_value(upstream_resp.headers, "Content-Length")
+        for key, value in upstream_resp.headers.items():
+            if key.lower() not in skip_headers:
+                client_writer.write(f"{key}: {value}\r\n".encode())
+        if content_length:
+            client_writer.write(f"Content-Length: {content_length}\r\n".encode())
+            chunked = False
+        else:
+            client_writer.write(b"Transfer-Encoding: chunked\r\n")
+            chunked = True
+        client_writer.write(b"\r\n")
+        await client_writer.drain()
+
+        total_bytes = 0
+        async for chunk in upstream_resp.content.iter_chunked(65536):
+            total_bytes += len(chunk)
+            if chunked:
+                client_writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            else:
+                client_writer.write(chunk)
+            await client_writer.drain()
+        if chunked:
+            client_writer.write(b"0\r\n\r\n")
+            await client_writer.drain()
+        return total_bytes
 
     async def _forward_websocket(
         self,
