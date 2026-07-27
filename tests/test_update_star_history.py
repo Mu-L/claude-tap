@@ -50,7 +50,11 @@ def test_fetch_stargazer_timestamps_rejects_invalid_repo(repo):
         fetch_stargazer_timestamps(repo, request_json=lambda _request: [])
 
 
-def test_render_charts_persists_valid_light_and_dark_pngs(tmp_path):
+def test_render_charts_persists_valid_light_and_dark_pngs(tmp_path, monkeypatch):
+    def reject_duplicate_title(*_args, **_kwargs):
+        raise AssertionError("the README section already provides the chart title")
+
+    monkeypatch.setattr("matplotlib.axes.Axes.set_title", reject_duplicate_title)
     timestamps = [
         datetime(2025, 1, 1, tzinfo=UTC),
         datetime(2025, 6, 1, tzinfo=UTC),

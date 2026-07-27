@@ -75,7 +75,6 @@ def render_charts(repo: str, timestamps: list[datetime], output_dir: Path) -> No
     output_dir.mkdir(parents=True, exist_ok=True)
     counts = list(range(1, len(timestamps) + 1))
     latest = timestamps[-1].strftime("%b %d, %Y").replace(" 0", " ")
-    repo_name = repo.split("/", 1)[1]
 
     themes = {
         "light": {
@@ -118,14 +117,6 @@ def render_charts(repo: str, timestamps: list[datetime], output_dir: Path) -> No
             zorder=3,
         )
 
-        ax.set_title(
-            f"{repo_name} Star History",
-            color=colors["foreground"],
-            fontsize=30,
-            fontweight="bold",
-            loc="left",
-            pad=28,
-        )
         ax.text(
             0,
             1.02,
@@ -148,7 +139,7 @@ def render_charts(repo: str, timestamps: list[datetime], output_dir: Path) -> No
         for spine in ax.spines.values():
             spine.set_color(colors["grid"])
 
-        fig.subplots_adjust(left=0.09, right=0.96, top=0.84, bottom=0.11)
+        fig.subplots_adjust(left=0.09, right=0.96, top=0.9, bottom=0.11)
         fig.savefig(
             output_dir / f"star-history-{name}.png",
             dpi=100,
