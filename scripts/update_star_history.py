@@ -12,8 +12,22 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-GITHUB_API_VERSION = "2022-11-28"
-STARGAZER_ACCEPT = "application/vnd.github.star+json"
+GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+STARGAZERS_QUERY = """
+query StarHistory($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    stargazers(first: 100, after: $cursor, orderBy: {field: STARRED_AT, direction: ASC}) {
+      edges {
+        starredAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -24,39 +38,62 @@ def _request_json(request: Request) -> object:
 
 def fetch_stargazer_timestamps(
     repo: str,
-    token: str | None = None,
+    token: str | None,
     request_json: Callable[[Request], object] = _request_json,
 ) -> list[datetime]:
     """Fetch every stargazer timestamp in chronological order."""
     if not REPO_PATTERN.fullmatch(repo) or any(part in {".", ".."} for part in repo.split("/")):
         raise ValueError("repo must use the OWNER/REPO format")
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN is required to fetch stargazer timestamps")
 
+    owner, name = repo.split("/")
     timestamps: list[datetime] = []
-    page = 1
+    cursor = None
+    page = 0
     while True:
+        page += 1
         if page > 1000:
             raise RuntimeError("GitHub stargazers pagination exceeded 1000 pages")
         request = Request(
-            f"https://api.github.com/repos/{repo}/stargazers?per_page=100&page={page}",
+            GITHUB_GRAPHQL_URL,
+            data=json.dumps(
+                {
+                    "query": STARGAZERS_QUERY,
+                    "variables": {"owner": owner, "name": name, "cursor": cursor},
+                }
+            ).encode(),
             headers={
-                "Accept": STARGAZER_ACCEPT,
-                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
                 "User-Agent": "claude-tap-star-history",
-                **({"Authorization": f"Bearer {token}"} if token else {}),
             },
+            method="POST",
         )
         payload = request_json(request)
-        if not isinstance(payload, list):
-            raise RuntimeError("GitHub stargazers response was not a list")
+        if not isinstance(payload, dict) or payload.get("errors"):
+            raise RuntimeError("GitHub GraphQL stargazers request failed")
+        try:
+            stargazers = payload["data"]["repository"]["stargazers"]
+            edges = stargazers["edges"]
+            page_info = stargazers["pageInfo"]
+        except (KeyError, TypeError) as error:
+            raise RuntimeError("GitHub GraphQL response omitted stargazer data") from error
+        if not isinstance(edges, list):
+            raise RuntimeError("GitHub GraphQL stargazer edges were not a list")
 
-        for item in payload:
-            if not isinstance(item, dict) or not isinstance(item.get("starred_at"), str):
-                raise RuntimeError("GitHub stargazers response omitted starred_at")
-            timestamps.append(datetime.fromisoformat(item["starred_at"].replace("Z", "+00:00")))
+        for edge in edges:
+            if not isinstance(edge, dict) or not isinstance(edge.get("starredAt"), str):
+                raise RuntimeError("GitHub GraphQL response omitted starredAt")
+            timestamps.append(datetime.fromisoformat(edge["starredAt"].replace("Z", "+00:00")))
 
-        if len(payload) < 100:
+        if not isinstance(page_info, dict) or not isinstance(page_info.get("hasNextPage"), bool):
+            raise RuntimeError("GitHub GraphQL response omitted pagination data")
+        if not page_info["hasNextPage"]:
             break
-        page += 1
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise RuntimeError("GitHub GraphQL response omitted the next cursor")
 
     if not timestamps:
         raise RuntimeError(f"{repo} has no stargazer timestamps")
