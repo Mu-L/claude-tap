@@ -77,7 +77,7 @@ def test_render_charts_persists_valid_light_and_dark_pngs(tmp_path, monkeypatch)
 def test_star_history_workflow_publishes_to_asset_branch():
     workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "star-history.yml").read_text()
 
-    assert 'cron: "17 3 * * *"' in workflow
+    assert 'cron: "0 19 * * *"' in workflow
     assert workflow.count("contents: read") == 1
     assert workflow.count("contents: write") == 1
     assert "needs: generate" in workflow
