@@ -35,6 +35,11 @@ from aiohttp._websocket.reader import WebSocketDataQueue, WebSocketReader
 from aiohttp.http_websocket import WS_KEY, WebSocketWriter
 from yarl import URL
 
+try:
+    from compression import zstd
+except ImportError:
+    import backports.zstd as zstd
+
 from claude_tap.bedrock import attach_bedrock_errors, is_bedrock_eventstream_path
 from claude_tap.certs import CertificateAuthority
 from claude_tap.proxy import (
@@ -125,6 +130,29 @@ def _header_value(headers: Mapping[str, str], name: str) -> str:
         if key.lower() == lower_name:
             return value
     return ""
+
+
+def _decode_request_body_for_trace(body: bytes, headers: Mapping[str, str]) -> bytes:
+    """Decode supported request content encodings without mutating upstream bytes.
+
+    Forward proxy reads raw HTTP frames, so unlike the MITM aiohttp path the
+    request body is still compressed when Content-Encoding is set. Decode only
+    for local trace parsing; the original compressed bytes stay on the wire.
+    """
+    encoding = _header_value(headers, "Content-Encoding").strip().lower()
+    if not encoding or encoding == "identity":
+        return body
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            return zlib.decompress(body)
+        if encoding == "zstd":
+            return zstd.decompress(body)
+    except Exception as exc:
+        log.warning("Failed to decompress %s request body for trace: %s", encoding, exc)
+        return body
+    return body
 
 
 def _has_package_manager_user_agent(headers: Mapping[str, str] | None) -> bool:
@@ -526,7 +554,8 @@ class ForwardProxyServer:
         t0 = time.monotonic()
         log_prefix = f"[Turn {turn}]" if turn is not None else "[relay]"
 
-        req_body = _parse_request_body_for_trace(body)
+        trace_body = _decode_request_body_for_trace(body, headers)
+        req_body = _parse_request_body_for_trace(trace_body)
         upstream_base_url = _upstream_base_url(upstream_url, path)
 
         is_streaming = is_capture_only_streaming_request(path, req_body)
