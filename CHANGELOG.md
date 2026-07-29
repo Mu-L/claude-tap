@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+
+## [0.1.141] - 2026-07-29
+
+### Changed
+- fix: remove duplicate star history chart title (#407)
+- ci: update star history at Beijing 3 AM (#409)
+- ci: fetch star history through GraphQL (#410)
+- fix: capture Pi zstd SSE requests (#398)
+- fix: resolve Codex App via ChatGPT.app or Codex.app (#413)
 ## [0.1.140] - 2026-07-27
 
 ### Changed
