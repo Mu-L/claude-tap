@@ -53,7 +53,7 @@ English version: [Support Matrix](support-matrix.md).
 |--------|----------|------|
 | `claude` | `reverse` | 单 provider，原生支持 Claude provider base URL 环境变量（`ANTHROPIC_BASE_URL`、`ANTHROPIC_BEDROCK_BASE_URL`、`ANTHROPIC_VERTEX_BASE_URL`） |
 | `codex` | `reverse` | 启动时临时注入使用代理 base URL 且设置 `supports_websockets=false` 的同级 provider，使每个请求生成一条自包含的 HTTP/SSE trace，同时不修改 `~/.codex/config.toml` |
-| `codexapp` | `forward` | Codex App 是 macOS `.app` bundle，没有 `OPENAI_BASE_URL` 式的覆盖能力；forward proxy 捕获其真实上游 HTTP/WebSocket 流量，并过滤为仅 `/backend-api/codex/responses` |
+| `codexapp` | `forward` | Codex 桌面端是 macOS `.app` bundle（当前多为 `ChatGPT.app`，旧版为 `Codex.app`，bundle id 均为 `com.openai.codex`），没有 `OPENAI_BASE_URL` 式覆盖；forward proxy 捕获真实上游 HTTP/WebSocket 流量，并过滤为仅 `/backend-api/codex/responses` |
 | `gemini` | `forward` | Google OAuth / Code Assist 会访问多个 Google 端点；forward proxy 不依赖单一 base URL，更适合作为默认 |
 | `grok` | `reverse` | 官方 CLI 原生支持 `GROK_CLI_CHAT_PROXY_BASE_URL`；reverse 模式无需安装本地 CA 即可捕获模型流量和 storage/trace 审计记录 |
 | `kimi` | `reverse` | 旧版 kimi-cli；原生 `KIMI_BASE_URL` 环境变量 |

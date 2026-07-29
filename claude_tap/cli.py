@@ -325,10 +325,13 @@ async def async_main(args: argparse.Namespace):
     trace_metadata = {"client": args.client, "proxy_mode": args.proxy_mode}
 
     codex_app_preflighted = False
+    codex_app_user_data_dir = None
     if args.client == "codexapp" and args.proxy_mode == "forward" and not args.no_launch:
-        if not await _prepare_codex_app_forward_launch():
+        launch_plan = await _prepare_codex_app_forward_launch()
+        if not launch_plan.proceed:
             return 1
         codex_app_preflighted = True
+        codex_app_user_data_dir = launch_plan.user_data_dir
 
     ca_cert_path: Path | None = None
     ca_key_path: Path | None = None
@@ -476,6 +479,7 @@ async def async_main(args: argparse.Namespace):
                     client_cmd=getattr(args, "client_cmd", None),
                     capture_only=capture_only,
                     codex_app_preflighted=codex_app_preflighted,
+                    codex_app_user_data_dir=codex_app_user_data_dir,
                 )
             except asyncio.CancelledError:
                 pass

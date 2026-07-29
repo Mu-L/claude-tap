@@ -14,6 +14,7 @@ from claude_tap.certs import (
     trust_macos_ca,
 )
 from claude_tap.cli import _ensure_ca_trust_for_forward_proxy, _trust_ca_for_current_user, async_main, trust_ca_main
+from claude_tap.cli_clients import CodexAppLaunchPlan
 from claude_tap.trace_store import get_trace_store, reset_trace_store
 
 
@@ -311,8 +312,8 @@ async def test_async_main_preflights_codex_app_before_creating_or_trusting_ca(
     monkeypatch.setenv("CLOUDTAP_DB", str(tmp_path / "codex-app-preflight.sqlite3"))
     reset_trace_store()
 
-    async def reject_launch() -> bool:
-        return False
+    async def reject_launch() -> CodexAppLaunchPlan:
+        return CodexAppLaunchPlan(proceed=False)
 
     monkeypatch.setattr("claude_tap.cli._prepare_codex_app_forward_launch", reject_launch)
     monkeypatch.setattr(

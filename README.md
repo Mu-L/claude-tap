@@ -313,20 +313,20 @@ claude-tap --tap-client codex -- --full-auto
 <details>
 <summary>Codex App backend capture examples</summary>
 
-Codex App is launched through claude-tap's forward proxy so the final `/backend-api/codex/responses` HTTP and WebSocket request bodies can be captured in the same trace viewer as other clients. Non-model Codex App product traffic is relayed but not persisted as trace rows. On macOS, claude-tap trusts its local CA in the current user's login keychain when needed so the bundled app-server can connect through the proxy.
+Codex App is launched through claude-tap's forward proxy so the final `/backend-api/codex/responses` HTTP and WebSocket request bodies can be captured in the same trace viewer as other clients. Current macOS installs ship as `ChatGPT.app` (bundle id `com.openai.codex`); older standalone `Codex.app` installs are still recognized. Non-model product traffic is relayed but not persisted as trace rows. On macOS, claude-tap trusts its local CA in the current user's login keychain when needed so the bundled app-server can connect through the proxy.
 
 ```bash
-# Launch Codex App and inspect captured backend requests in the dashboard
+# Launch Codex App (ChatGPT.app or Codex.app) and inspect captured backend requests
 claude-tap --tap-client codexapp
 
 # Keep raw WebSocket/SSE event arrays in the trace
 claude-tap --tap-client codexapp --tap-store-stream-events
 
-# Use a non-standard Codex.app install path
-CODEX_APP_EXECUTABLE=/path/to/Codex.app/Contents/MacOS/Codex claude-tap --tap-client codexapp
+# Override the executable when the app is installed outside the default locations
+CODEX_APP_EXECUTABLE=/path/to/ChatGPT.app/Contents/MacOS/ChatGPT claude-tap --tap-client codexapp
 ```
 
-If Codex App is already running, quit it first so the new process inherits the proxy and CA environment from claude-tap. This mode records live backend traffic instead of importing local session JSONL transcripts.
+If Codex/ChatGPT App is already running, claude-tap launches an isolated second instance with a dedicated `--user-data-dir` under `~/.claude-tap/codex-app-profiles/tap` so your current window keeps working. You may need to sign in again in the tapped window. Override the profile with `CODEX_APP_USER_DATA_DIR`. This mode records live backend traffic instead of importing local session JSONL transcripts.
 
 </details>
 

@@ -130,7 +130,7 @@ def test_codexapp_declares_raw_backend_capture_mode() -> None:
     cfg = CLIENT_CONFIGS["codexapp"]
 
     assert cfg.label == "Codex App"
-    assert cfg.cmd == "/Applications/Codex.app/Contents/MacOS/Codex"
+    assert cfg.cmd == "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
     assert cfg.default_target == "https://chatgpt.com/backend-api/codex"
     assert cfg.default_proxy_mode == "forward"
     assert cfg.forward_trace_methods == ("POST", "WEBSOCKET")

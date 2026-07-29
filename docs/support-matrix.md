@@ -54,7 +54,7 @@ Each client in `CLIENT_CONFIGS` declares a `default_proxy_mode` used when
 |--------|--------------|--------|
 | `claude` | `reverse` | Single provider, native Claude provider base URL env vars (`ANTHROPIC_BASE_URL`, `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`) |
 | `codex` | `reverse` | Launches a temporary sibling provider with the proxy base URL and `supports_websockets=false`, producing one self-contained HTTP/SSE trace record per request without changing `~/.codex/config.toml` |
-| `codexapp` | `forward` | Codex App is a macOS `.app` bundle with no `OPENAI_BASE_URL`-style override; forward proxy captures its real upstream HTTP/WebSocket traffic, filtered to `/backend-api/codex/responses` |
+| `codexapp` | `forward` | Codex desktop runtime is a macOS `.app` bundle (`ChatGPT.app` today, legacy `Codex.app`; both use `com.openai.codex`) with no `OPENAI_BASE_URL`-style override; forward proxy captures its real upstream HTTP/WebSocket traffic, filtered to `/backend-api/codex/responses` |
 | `gemini` | `forward` | Google OAuth / Code Assist uses several Google endpoints; forward proxy captures the flow without assuming a single base URL |
 | `grok` | `reverse` | The official CLI honors `GROK_CLI_CHAT_PROXY_BASE_URL`; reverse mode captures model traffic plus storage/trace audit records without installing a local CA |
 | `kimi` | `reverse` | Legacy kimi-cli; native `KIMI_BASE_URL` env var |

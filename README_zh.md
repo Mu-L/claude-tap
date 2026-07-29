@@ -307,20 +307,20 @@ claude-tap --tap-client codex -- --full-auto
 <details>
 <summary>Codex App 后端捕获示例</summary>
 
-Codex App 会通过 claude-tap 的 forward proxy 启动，因此最终发往 `/backend-api/codex/responses` 的 HTTP 和 WebSocket 请求体会像其他客户端一样进入 trace viewer。非模型的 Codex App 产品流量会照常转发，但不会持久化成 trace 行。在 macOS 上，必要时 claude-tap 会把本地 CA 信任到当前用户的登录钥匙串中，让内置 app-server 能通过代理连接。
+Codex App 会通过 claude-tap 的 forward proxy 启动，因此最终发往 `/backend-api/codex/responses` 的 HTTP 和 WebSocket 请求体会像其他客户端一样进入 trace viewer。当前 macOS 安装包多为 `ChatGPT.app`（bundle id 仍是 `com.openai.codex`）；旧版独立 `Codex.app` 也会被识别。非模型产品流量会照常转发，但不会持久化成 trace 行。在 macOS 上，必要时 claude-tap 会把本地 CA 信任到当前用户的登录钥匙串中，让内置 app-server 能通过代理连接。
 
 ```bash
-# 启动 Codex App，并在 dashboard 中查看捕获到的后端请求
+# 启动 Codex App（ChatGPT.app 或 Codex.app），并在 dashboard 中查看捕获到的后端请求
 claude-tap --tap-client codexapp
 
 # 在 trace 中保留原始 WebSocket/SSE 事件数组
 claude-tap --tap-client codexapp --tap-store-stream-events
 
-# 使用非标准的 Codex.app 安装路径
-CODEX_APP_EXECUTABLE=/path/to/Codex.app/Contents/MacOS/Codex claude-tap --tap-client codexapp
+# 应用不在默认安装位置时，可覆盖可执行文件路径
+CODEX_APP_EXECUTABLE=/path/to/ChatGPT.app/Contents/MacOS/ChatGPT claude-tap --tap-client codexapp
 ```
 
-如果 Codex App 已经在运行，请先退出它，再让 claude-tap 启动新的进程，这样新进程才能继承代理和 CA 环境。这个模式捕获实时后端流量，不再导入本地 session JSONL transcript。
+如果 Codex/ChatGPT App 已经在运行，claude-tap 会用独立的 `--user-data-dir`（默认 `~/.claude-tap/codex-app-profiles/tap`）再拉起第二份实例，不打断你当前窗口；被代理的那份窗口可能需要重新登录。可用 `CODEX_APP_USER_DATA_DIR` 覆盖 profile 路径。这个模式捕获实时后端流量，不再导入本地 session JSONL transcript。
 
 </details>
 
