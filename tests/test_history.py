@@ -408,12 +408,22 @@ async def test_shared_dashboard_delete_history_requires_force_for_active_session
 
     _write_legacy_session(tmp_path, "trace_delete_me", date="2026-05-01")
     migrate_legacy_traces(tmp_path)
-    active_session = get_trace_store().create_session(
+    store = get_trace_store()
+    active_session = store.create_session(
         client="claude",
         proxy_mode="reverse",
         started_at=datetime(2026, 5, 1, 12, 30, tzinfo=timezone.utc),
     )
-    conn = get_trace_store()._connect()
+    store.append_record(
+        active_session,
+        {
+            "timestamp": "2026-05-01T12:31:00+00:00",
+            "turn": 1,
+            "request": {"method": "POST", "path": "/v1/messages", "body": {"model": "claude-sonnet-4-6"}},
+            "response": {"status": 200, "body": {"content": [{"type": "text", "text": "ok"}]}},
+        },
+    )
+    conn = store._connect()
     conn.execute(
         "UPDATE sessions SET updated_at = ? WHERE id = ?",
         (datetime.now(timezone.utc).isoformat(), active_session),
@@ -430,7 +440,7 @@ async def test_shared_dashboard_delete_history_requires_force_for_active_session
                 assert payload["deleted_sessions"] == 1
                 assert payload["skipped_sessions"] == 1
 
-            remaining = {row["id"] for row in get_trace_store().list_session_rows()}
+            remaining = {row["id"] for row in store.list_session_rows()}
             assert active_session in remaining
 
             async with session.delete(f"http://127.0.0.1:{port}/api/traces/2026-05-01?force=1") as resp:
@@ -439,7 +449,7 @@ async def test_shared_dashboard_delete_history_requires_force_for_active_session
                 assert payload["deleted_sessions"] == 1
                 assert payload["skipped_sessions"] == 0
 
-            remaining = {row["id"] for row in get_trace_store().list_session_rows()}
+            remaining = {row["id"] for row in store.list_session_rows()}
             assert active_session not in remaining
     finally:
         await server.stop()

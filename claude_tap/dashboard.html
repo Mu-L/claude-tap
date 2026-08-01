@@ -1877,6 +1877,8 @@ function renderOverview() {
 	}
 
 	function canDeleteSession(session) {
+	  // Fresh active writers stay protected. Abandoned zero-trace startups are
+	  // finalized to status=empty before the session list/delete handlers run.
 	  return Boolean(session) && !session.live && !session.active && session.status !== "active";
 	}
 

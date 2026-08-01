@@ -36,6 +36,10 @@ WRITE_LOCK_RETRY_SECONDS = 0.01
 WRITE_LOCK_SUFFIX = ".write.lock"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 STALE_ACTIVE_SESSION_AFTER = timedelta(hours=24)
+# Zero-trace active sessions are usually abandoned startups. Finalize them sooner
+# so shared dashboards can clean them up without waiting a full day, while still
+# protecting writers that have not emitted their first API record yet.
+STALE_EMPTY_ACTIVE_SESSION_AFTER = timedelta(minutes=15)
 
 
 @dataclass(frozen=True)
@@ -422,16 +426,27 @@ class TraceStore:
     ) -> int:
         """Mark stale active sessions complete so abandoned traces can be managed."""
         protected = protected_session_ids or set()
-        cutoff = (now or datetime.now(timezone.utc)) - STALE_ACTIVE_SESSION_AFTER
+        current = now or datetime.now(timezone.utc)
+        empty_cutoff = current - STALE_EMPTY_ACTIVE_SESSION_AFTER
+        record_cutoff = current - STALE_ACTIVE_SESSION_AFTER
         with self._write_access() as conn:
             rows = conn.execute(
                 """
                 SELECT id, record_count, summary_json
                 FROM sessions
                 WHERE status = 'active'
-                  AND COALESCE(julianday(updated_at), 0) <= julianday(?)
+                  AND (
+                    (
+                      COALESCE(record_count, 0) = 0
+                      AND COALESCE(julianday(updated_at), 0) <= julianday(?)
+                    )
+                    OR (
+                      COALESCE(record_count, 0) > 0
+                      AND COALESCE(julianday(updated_at), 0) <= julianday(?)
+                    )
+                  )
                 """,
-                (cutoff.isoformat(),),
+                (empty_cutoff.isoformat(), record_cutoff.isoformat()),
             ).fetchall()
             updated = 0
             for row in rows:

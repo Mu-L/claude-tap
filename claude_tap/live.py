@@ -159,6 +159,18 @@ def _session_offset_from_request(request: web.Request) -> int:
     return max(0, offset)
 
 
+def _session_row_blocks_delete(row, *, live_session_id: str | None) -> bool:
+    """Return True when a stored session must stay undeleted.
+
+    The current live writer is always protected. Remaining `active` rows stay
+    protected too; callers finalize stale sessions first, including abandoned
+    zero-trace startups after ``STALE_EMPTY_ACTIVE_SESSION_AFTER``.
+    """
+    if live_session_id and row["id"] == live_session_id:
+        return True
+    return (row["status"] or "") == "active"
+
+
 def _session_query_from_request(request: web.Request):
     return build_session_query(
         date=request.query.get("date", ""),
@@ -639,7 +651,7 @@ class LiveViewerServer:
             return web.json_response({"error": "Session not found"}, status=404)
         if self.session_id and session_id == self.session_id:
             return web.json_response({"error": "Live session cannot be deleted"}, status=409)
-        if (row["status"] or "") == "active":
+        if _session_row_blocks_delete(row, live_session_id=None):
             return web.json_response({"error": "Active session cannot be deleted"}, status=409)
         result = store.delete_session(session_id)
         await self._broadcast_dashboard_event({"type": "refresh"})
@@ -668,10 +680,7 @@ class LiveViewerServer:
             if row is None:
                 missing_ids.append(session_id)
                 continue
-            if self.session_id and session_id == self.session_id:
-                skipped_active.append(session_id)
-                continue
-            if (row["status"] or "") == "active":
+            if _session_row_blocks_delete(row, live_session_id=self.session_id):
                 skipped_active.append(session_id)
                 continue
             deletable_ids.append(session_id)
@@ -772,7 +781,7 @@ class LiveViewerServer:
             protected.add(self.session_id)
         elif not force:
             for row in get_trace_store().list_session_rows():
-                if (row["status"] or "") == "active":
+                if _session_row_blocks_delete(row, live_session_id=None):
                     protected.add(row["id"])
         try:
             result = delete_trace_history(date_key, protected_session_ids=protected)
