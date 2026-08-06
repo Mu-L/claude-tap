@@ -411,14 +411,28 @@ def changed_viewer_css_selectors(viewer_css: Path, changed_lines: dict[str, set[
 
 
 def _main_viewer_script(coverage: dict[str, Any], suffix: str) -> dict[str, Any]:
+    scripts = coverage.get("result") or []
     candidates = [
-        script
-        for script in coverage["result"]
-        if script.get("url", "").endswith(suffix) and len(script.get("functions", [])) > 50
+        script for script in scripts if script.get("url", "").endswith(suffix) and len(script.get("functions", [])) > 50
     ]
     if not candidates:
-        raise RuntimeError("Could not find viewer.html main script in V8 coverage output")
+        candidates = [
+            script for script in scripts if suffix in script.get("url", "") and len(script.get("functions", [])) > 50
+        ]
+    if not candidates:
+        # Linux Chromium often reports the inlined viewer bundle with an empty
+        # script URL. Page-scoped snapshots make "largest script" safe here.
+        candidates = [script for script in scripts if len(script.get("functions", [])) > 50]
+    if not candidates:
+        sizes = sorted((len(script.get("functions", [])), script.get("url", "")) for script in scripts)
+        top = ", ".join(f"{count}:{url[-60:]}" for count, url in sizes[-5:]) or "none"
+        raise RuntimeError(f"Could not find viewer.html main script in V8 coverage output (suffix={suffix}; top={top})")
     return max(candidates, key=lambda script: len(script.get("functions", [])))
+
+
+def _restart_precise_coverage(session: Any) -> None:
+    session.send("Profiler.stopPreciseCoverage")
+    session.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
 
 
 def _is_top_level_wrapper(function: dict[str, Any], script_end: int) -> bool:
@@ -583,6 +597,39 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                     output_tokens: 1,
                   }, 0);
                   normalizeDisplayTurns([stubEntry], true);
+                  const cursorStub = buildStubEntry({
+                    turn: 1,
+                    transport: 'cursor-transcript',
+                    method: 'CURSOR_TRANSCRIPT',
+                    path: '/cursor/transcript/coverage/turn/1/step/1',
+                    model: 'grok-4.5',
+                    session_user_text: 'coverage cursor prompt',
+                    cursor_turn: 1,
+                    cursor_step: 1,
+                    status: 200,
+                  }, 0);
+                  isCursorTranscriptEntry(cursorStub);
+                  isCursorTranscriptEntry({ request: { path: '/v1/messages' } });
+                  cursorTurnOf(cursorStub);
+                  cursorTurnOf({ request: { body: {} } });
+                  looksLikeBinaryText('\\x12\\x04prod');
+                  isProtobufNoiseEntry({
+                    request: {
+                      path: '/aiserver.v1.DashboardService/GetCliDownloadUrl',
+                      headers: { 'Content-Type': 'application/proto' },
+                      body: '\\x12\\x04prod',
+                    },
+                  });
+                  filterPathKey('/cursor/transcript/coverage/turn/1/step/1');
+                  firstUserInputInfo(cursorStub);
+                  latestUserInputInfo(cursorStub);
+                  stubSessionUserText(cursorStub);
+                  shouldContinueSessionGroup(
+                    cursorStub,
+                    firstUserInputInfo(cursorStub),
+                    { userText: 'coverage cursor prompt', userIndex: 0, metadataOnly: false },
+                  );
+                  normalizeDisplayTurns([cursorStub, cursorStub], true);
                   const imageBlock = {
                     type: 'image',
                     source: {
@@ -709,6 +756,11 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                     }""",
                     index,
                 )
+            # Page-scoped snapshots: Linux Chromium may report later file://
+            # viewer bundles with empty script URLs, so restart coverage between
+            # navigations and resolve each page independently.
+            main_page_coverage = session.send("Profiler.takePreciseCoverage")
+            _restart_precise_coverage(session)
             page.goto(compact_html_path.resolve().as_uri(), timeout=10000)
             page.wait_for_selector(".sidebar-item", timeout=5000)
             page.evaluate(
@@ -748,6 +800,8 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                 }""",
                 compact_bundle_path.read_text(encoding="utf-8"),
             )
+            compact_page_coverage = session.send("Profiler.takePreciseCoverage")
+            _restart_precise_coverage(session)
             page.goto(remote_html_path.resolve().as_uri(), timeout=10000)
             page.wait_for_selector(".sidebar-item", timeout=5000)
             page.evaluate(
@@ -763,21 +817,23 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                 }"""
             )
             page.wait_for_selector("#detail .section", timeout=5000)
+            remote_page_coverage = session.send("Profiler.takePreciseCoverage")
+            _restart_precise_coverage(session)
             page.goto(empty_html_path.resolve().as_uri(), timeout=10000)
             page.wait_for_selector(".empty-trace-state", timeout=5000)
             page.set_input_files("#file-input", str(compact_bundle_path))
             page.wait_for_selector(".sidebar-item", timeout=5000)
             page.goto(empty_html_path.resolve().as_uri(), timeout=10000)
             page.wait_for_selector(".empty-trace-state", timeout=5000)
-            coverage = session.send("Profiler.takePreciseCoverage")
+            empty_page_coverage = session.send("Profiler.takePreciseCoverage")
             session.send("Profiler.stopPreciseCoverage")
             session.send("Profiler.disable")
             browser.close()
 
-    main_functions = _viewer_script_functions(_main_viewer_script(coverage, "v8_coverage.html"))
-    empty_functions = _viewer_script_functions(_main_viewer_script(coverage, "empty_coverage.html"))
-    compact_functions = _viewer_script_functions(_main_viewer_script(coverage, "compact_coverage.html"))
-    remote_functions = _viewer_script_functions(_main_viewer_script(coverage, "remote_coverage.html"))
+    main_functions = _viewer_script_functions(_main_viewer_script(main_page_coverage, "v8_coverage.html"))
+    empty_functions = _viewer_script_functions(_main_viewer_script(empty_page_coverage, "empty_coverage.html"))
+    compact_functions = _viewer_script_functions(_main_viewer_script(compact_page_coverage, "compact_coverage.html"))
+    remote_functions = _viewer_script_functions(_main_viewer_script(remote_page_coverage, "remote_coverage.html"))
     auxiliary_covered_names = {
         function.get("functionName", "")
         for function in [*empty_functions, *compact_functions, *remote_functions]
