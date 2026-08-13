@@ -122,6 +122,11 @@ def _matches_path_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
     )
 
 
+def _matches_path_suffix(path: str, suffixes: tuple[str, ...]) -> bool:
+    clean = path.split("?", 1)[0].rstrip("/").lower()
+    return any(clean.endswith(suffix.lower()) for suffix in suffixes)
+
+
 def _header_value(headers: Mapping[str, str], name: str) -> str:
     if value := headers.get(name):
         return value
@@ -273,6 +278,7 @@ class ForwardProxyServer:
         local_reverse_allowed_path_prefixes: tuple[str, ...] = (),
         trace_methods: tuple[str, ...] = (),
         trace_path_prefixes: tuple[str, ...] = (),
+        trace_path_suffixes: tuple[str, ...] = (),
         store_stream_events: bool = False,
         capture_only: bool = False,
     ) -> None:
@@ -285,6 +291,7 @@ class ForwardProxyServer:
         self._local_reverse_allowed_path_prefixes = local_reverse_allowed_path_prefixes
         self._trace_methods = frozenset(method.upper() for method in trace_methods)
         self._trace_path_prefixes = trace_path_prefixes
+        self._trace_path_suffixes = trace_path_suffixes
         self._store_stream_events = store_stream_events
         self._capture_only = capture_only
         self._server: asyncio.Server | None = None
@@ -296,7 +303,11 @@ class ForwardProxyServer:
     def _should_trace_request(self, method: str, path: str) -> bool:
         if self._trace_methods and method.upper() not in self._trace_methods:
             return False
-        if self._trace_path_prefixes and not _matches_path_prefix(path, self._trace_path_prefixes):
+        has_path_filter = bool(self._trace_path_prefixes or self._trace_path_suffixes)
+        matches_path = _matches_path_prefix(path, self._trace_path_prefixes) or _matches_path_suffix(
+            path, self._trace_path_suffixes
+        )
+        if has_path_filter and not matches_path:
             return False
         return True
 

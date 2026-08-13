@@ -1,6 +1,6 @@
 ---
 owner: claude-tap-maintainers
-last_reviewed: 2026-07-18
+last_reviewed: 2026-08-13
 source_of_truth: AGENTS.md
 ---
 
@@ -26,6 +26,8 @@ Simplified Chinese version: [支持矩阵](support-matrix.zh.md).
 | Gemini CLI | Google OAuth / Code Assist | Forward proxy (Google endpoints) | n/a | HTTP/SSE | Real E2E verified |
 | Gemini CLI | API key / Vertex-compatible config (`--tap-proxy-mode reverse`) | `https://generativelanguage.googleapis.com` | none | HTTP/SSE | Unit-tested |
 | Grok Build CLI | Grok subscription OAuth (`grok login`) | `https://cli-chat-proxy.grok.com/v1` | `/v1` | HTTP/SSE Responses plus storage/trace audit records | Real E2E verified with Grok 0.2.101 |
+| DeepSeek Harness (`dsh`) | `DEEPSEEK_API_KEY` or dsh credential store | Configured DeepSeek endpoint, including loopback gateways; default `https://api.deepseek.com` | n/a | Forward proxy HTTP/SSE Chat Completions; requires Node `--use-env-proxy` support | Real E2E verified with dsh 0.0.1-rc.2; local-gateway E2E covered |
+| DeepSeek Harness (`dsh`) | Environment-configured endpoint (`--tap-proxy-mode reverse`) | `DEEPSEEK_BASE_URL` or `https://api.deepseek.com` | none | HTTP/SSE Chat Completions | Unit-tested (`DEEPSEEK_BASE_URL`) |
 | Kimi CLI (legacy kimi-cli) | Kimi CLI auth/config | `https://api.kimi.com/coding/v1` | none | HTTP/SSE Chat Completions | Unit-tested (`KIMI_BASE_URL`) |
 | Kimi CLI (legacy kimi-cli) | Kimi CLI auth/config | `https://api.moonshot.ai/v1` | none | HTTP/SSE Chat Completions | Supported by config |
 | Kimi Code CLI | `~/.kimi-code/config.toml` + OAuth (`managed:kimi-code`) | `https://api.kimi.com/coding/v1` | none | HTTP/SSE Chat Completions | Unit-tested (`KIMI_CODE_HOME` sandbox) |
@@ -57,6 +59,7 @@ Each client in `CLIENT_CONFIGS` declares a `default_proxy_mode` used when
 | `codexapp` | `forward` | Codex desktop runtime is a macOS `.app` bundle (`ChatGPT.app` today, legacy `Codex.app`; both use `com.openai.codex`) with no `OPENAI_BASE_URL`-style override; forward proxy captures its real upstream HTTP/WebSocket traffic, filtered to `/backend-api/codex/responses` |
 | `gemini` | `forward` | Google OAuth / Code Assist uses several Google endpoints; forward proxy captures the flow without assuming a single base URL |
 | `grok` | `reverse` | The official CLI honors `GROK_CLI_CHAT_PROXY_BASE_URL`; reverse mode captures model traffic plus storage/trace audit records without installing a local CA |
+| `dsh` | `forward` | A stored dsh model `baseURL` outranks `DEEPSEEK_BASE_URL`; verified Node environment-proxy support captures stored, environment-configured, and loopback endpoints while persisting only Chat Completions traffic |
 | `kimi` | `reverse` | Legacy kimi-cli; native `KIMI_BASE_URL` env var |
 | `kimi-code` | `reverse` | Patches `~/.kimi-code/config.toml` via temporary `KIMI_CODE_HOME` sandbox |
 | `mimo` | `forward` | OpenCode fork; multi-provider — forward proxy captures every upstream regardless of which env var the client honors |
@@ -124,6 +127,7 @@ strip = CLIENT_CONFIGS[client].reverse_strip_path_prefix(target)
 - `test_forward_proxy_client_filter_*` (`tests/test_e2e.py`) — verifies forward proxy `forward_trace_methods`/`forward_trace_path_prefixes` filtering relays Codex App product traffic while only tracing `/backend-api/codex/responses` HTTP and WebSocket calls
 - `test_gemini_registered_in_client_configs` — verifies Gemini CLI registration and default forward mode
 - `test_grok_*` — verifies Grok Build registration, reverse-mode URL injection, target detection, `/v1` routing, and fake-upstream Responses/storage/trace capture
+- `test_dsh_*` — verifies dsh registration, Node proxy capability checks, loopback/`NO_PROXY` forwarding, Chat Completions-only trace filtering, reverse-mode `DEEPSEEK_BASE_URL` injection, target detection, argument passthrough, and fake-upstream capture
 - `test_run_client_gemini_forward_sets_proxy_ca_and_skips_base_url_envs` — verifies Gemini forward proxy launch env
 - `test_run_client_gemini_reverse_sets_both_base_url_envs` — verifies Gemini reverse proxy base URL env injection
 - `test_viewer_renders_gemini_semantic_sections` — verifies Gemini systemInstruction, contents, functionDeclarations, functionCall, functionResponse, SSE output, and token usage render as semantic viewer sections

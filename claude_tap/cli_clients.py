@@ -328,6 +328,7 @@ class ClientConfig:
     # product traffic can still relay everything while persisting only model API calls.
     forward_trace_methods: tuple[str, ...] = ()
     forward_trace_path_prefixes: tuple[str, ...] = ()
+    forward_trace_path_suffixes: tuple[str, ...] = ()
     # Transcript-only clients are observed from local session logs instead of a
     # spawned process and do not need a reverse or forward proxy.
     transcript_only: bool = False
@@ -428,6 +429,19 @@ CLIENT_CONFIGS: dict[str, ClientConfig] = {
             "/v1/storage",
             "/v1/traces",
         ),
+    ),
+    "dsh": ClientConfig(
+        cmd="dsh",
+        label="DeepSeek Harness",
+        install_url="https://github.com/deepseek-ai/deepseek-harness",
+        base_url_env="DEEPSEEK_BASE_URL",
+        base_url_suffix="",
+        default_target="https://api.deepseek.com",
+        # A stored dsh model baseURL outranks DEEPSEEK_BASE_URL. Forward mode
+        # captures both stored and environment-configured endpoints reliably.
+        default_proxy_mode="forward",
+        forward_trace_methods=("POST",),
+        forward_trace_path_suffixes=("/chat/completions",),
     ),
     "codexapp": ClientConfig(
         # Prefer the current ChatGPT.app host binary when present; resolution
@@ -594,6 +608,27 @@ def _prefer_windows_command_shim(resolved_cmd: str) -> str:
     return resolved_cmd
 
 
+def _node_supports_env_proxy(env: dict[str, str]) -> bool:
+    """Return whether the Node runtime on PATH supports ``--use-env-proxy``."""
+    node_cmd = shutil.which("node", path=env.get("PATH"))
+    if node_cmd is None:
+        return False
+    probe_env = env.copy()
+    probe_env.pop("NODE_OPTIONS", None)
+    try:
+        result = subprocess.run(
+            [node_cmd, "--use-env-proxy", "--version"],
+            env=probe_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 async def run_client(
     port: int,
     extra_args: list[str],
@@ -646,6 +681,14 @@ async def run_client(
     inject_proxy = not cfg.transcript_only
 
     if inject_proxy and proxy_mode == "forward":
+        if client == "dsh" and not _node_supports_env_proxy(env):
+            print(
+                "\nError: DeepSeek Harness forward capture requires a Node runtime "
+                "with --use-env-proxy support.\n"
+                "Upgrade Node until `node --use-env-proxy --version` succeeds, or use "
+                "--tap-proxy-mode reverse when dsh is configured through DEEPSEEK_BASE_URL.\n"
+            )
+            return 1
         proxy_url = f"http://127.0.0.1:{port}"
         if client == "codexapp":
             cmd_args.insert(0, f"--proxy-server={proxy_url}")
@@ -659,11 +702,18 @@ async def run_client(
         env["http_proxy"] = proxy_url
         env["https_proxy"] = proxy_url
         env["all_proxy"] = proxy_url
-        if client == "pi":
-            # Pi's SSE transport uses Node fetch, which only reads proxy env vars
-            # when built-in environment proxy support is enabled.
+        if client in {"dsh", "pi"}:
+            # These clients use Node fetch, which only reads proxy env vars when
+            # built-in environment proxy support is enabled.
             env["NODE_USE_ENV_PROXY"] = "1"
-        _extend_no_proxy(env, ("localhost", "127.0.0.1", "::1"))
+        if client == "dsh":
+            # A dsh model can store any baseURL, including a loopback gateway.
+            # Route every child request through tap; the proxy's own upstream
+            # session still honors the user's original NO_PROXY settings.
+            env["NO_PROXY"] = ""
+            env["no_proxy"] = ""
+        else:
+            _extend_no_proxy(env, ("localhost", "127.0.0.1", "::1"))
         if client == "mimo":
             # MiMo defaults to mimo-only mode and ignores provider env vars unless disabled.
             env["MIMOCODE_MIMO_ONLY"] = "false"
@@ -1305,6 +1355,14 @@ def _detect_grok_target() -> str:
     if env_target:
         return env_target
     return CLIENT_CONFIGS["grok"].default_target
+
+
+def _detect_dsh_target() -> str:
+    """Auto-detect the DeepSeek endpoint used by dsh reverse mode."""
+    env_target = os.environ.get(CLIENT_CONFIGS["dsh"].base_url_env, "").strip()
+    if env_target:
+        return env_target
+    return CLIENT_CONFIGS["dsh"].default_target
 
 
 def _read_codebuddy_endpoint_cache() -> str | None:
@@ -2232,6 +2290,7 @@ TARGET_DETECTORS = {
     "claude": _detect_claude_target,
     "codex": _detect_codex_target,
     "codebuddy": _detect_codebuddy_target,
+    "dsh": _detect_dsh_target,
     "grok": _detect_grok_target,
     "kimi-code": _detect_kimi_code_target,
     "openclaw": _detect_openclaw_target,

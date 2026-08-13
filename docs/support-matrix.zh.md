@@ -1,6 +1,6 @@
 ---
 owner: claude-tap-maintainers
-last_reviewed: 2026-07-18
+last_reviewed: 2026-08-13
 source_of_truth: AGENTS.md
 ---
 
@@ -26,6 +26,8 @@ English version: [Support Matrix](support-matrix.md).
 | Gemini CLI | Google OAuth / Code Assist | Forward proxy（Google 端点） | n/a | HTTP/SSE | 真实 E2E 已验证 |
 | Gemini CLI | API key / Vertex 兼容配置（`--tap-proxy-mode reverse`） | `https://generativelanguage.googleapis.com` | 无 | HTTP/SSE | 单测覆盖 |
 | Grok Build CLI | Grok 订阅 OAuth（`grok login`） | `https://cli-chat-proxy.grok.com/v1` | `/v1` | HTTP/SSE Responses，以及 storage/trace 审计记录 | 已使用 Grok 0.2.101 完成真实 E2E 验证 |
+| DeepSeek Harness（`dsh`） | `DEEPSEEK_API_KEY` 或 dsh 凭据存储 | 已配置的 DeepSeek 端点，包括本地回环网关；默认 `https://api.deepseek.com` | n/a | Forward proxy HTTP/SSE Chat Completions；要求 Node 支持 `--use-env-proxy` | 已使用 dsh 0.0.1-rc.2 完成真实 E2E 验证；本地网关 E2E 已覆盖 |
+| DeepSeek Harness（`dsh`） | 环境变量配置的端点（`--tap-proxy-mode reverse`） | `DEEPSEEK_BASE_URL` 或 `https://api.deepseek.com` | 无 | HTTP/SSE Chat Completions | 单测覆盖（`DEEPSEEK_BASE_URL`） |
 | Kimi CLI（旧版 kimi-cli） | Kimi CLI 认证/配置 | `https://api.kimi.com/coding/v1` | 无 | HTTP/SSE Chat Completions | 单测覆盖（`KIMI_BASE_URL`） |
 | Kimi CLI（旧版 kimi-cli） | Kimi CLI 认证/配置 | `https://api.moonshot.ai/v1` | 无 | HTTP/SSE Chat Completions | 配置支持 |
 | Kimi Code CLI | `~/.kimi-code/config.toml` + OAuth（`managed:kimi-code`） | `https://api.kimi.com/coding/v1` | 无 | HTTP/SSE Chat Completions | 单测覆盖（`KIMI_CODE_HOME` sandbox） |
@@ -56,6 +58,7 @@ English version: [Support Matrix](support-matrix.md).
 | `codexapp` | `forward` | Codex 桌面端是 macOS `.app` bundle（当前多为 `ChatGPT.app`，旧版为 `Codex.app`，bundle id 均为 `com.openai.codex`），没有 `OPENAI_BASE_URL` 式覆盖；forward proxy 捕获真实上游 HTTP/WebSocket 流量，并过滤为仅 `/backend-api/codex/responses` |
 | `gemini` | `forward` | Google OAuth / Code Assist 会访问多个 Google 端点；forward proxy 不依赖单一 base URL，更适合作为默认 |
 | `grok` | `reverse` | 官方 CLI 原生支持 `GROK_CLI_CHAT_PROXY_BASE_URL`；reverse 模式无需安装本地 CA 即可捕获模型流量和 storage/trace 审计记录 |
+| `dsh` | `forward` | dsh 模型设置中保存的 `baseURL` 优先于 `DEEPSEEK_BASE_URL`；经能力确认的 Node 环境代理可以捕获设置、环境变量及本地回环端点，并且仅持久化 Chat Completions 流量 |
 | `kimi` | `reverse` | 旧版 kimi-cli；原生 `KIMI_BASE_URL` 环境变量 |
 | `kimi-code` | `reverse` | 通过临时 `KIMI_CODE_HOME` sandbox 补丁 `~/.kimi-code/config.toml` |
 | `mimo` | `forward` | OpenCode fork；多 provider — forward proxy 可以捕获所有上游，而不依赖客户端支持哪个环境变量 |
@@ -118,6 +121,7 @@ strip = CLIENT_CONFIGS[client].reverse_strip_path_prefix(target)
 - `test_forward_proxy_client_filter_*`（`tests/test_e2e.py`）：验证 forward proxy 的 `forward_trace_methods`/`forward_trace_path_prefixes` 过滤会照常转发 Codex App 产品流量，但只记录 `/backend-api/codex/responses` 的 HTTP 和 WebSocket 请求
 - `test_gemini_registered_in_client_configs`：验证 Gemini CLI 注册和默认 forward 模式
 - `test_grok_*`：验证 Grok Build 注册、reverse 模式 URL 注入、目标探测、`/v1` 路由和 fake upstream Responses/storage/trace 捕获
+- `test_dsh_*`：验证 dsh 注册、Node 代理能力检查、本地回环/`NO_PROXY` 转发、仅记录 Chat Completions、reverse 模式 `DEEPSEEK_BASE_URL` 注入、目标探测、参数透传和 fake upstream 捕获
 - `test_run_client_gemini_forward_sets_proxy_ca_and_skips_base_url_envs`：验证 Gemini forward proxy 启动环境变量
 - `test_run_client_gemini_reverse_sets_both_base_url_envs`：验证 Gemini reverse proxy base URL 环境变量注入
 - `test_viewer_renders_gemini_semantic_sections`：验证 Gemini systemInstruction、contents、functionDeclarations、functionCall、functionResponse、SSE output 和 token usage 会渲染为语义化 viewer 区块
