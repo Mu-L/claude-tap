@@ -35,6 +35,8 @@ def test_viewer_session_sort_label_uses_query_language() -> None:
 
     assert entries["en"]["sort_session"] == "Query"
     assert entries["zh-CN"]["sort_session"] == "用户输入"
+    assert entries["en"]["tab_trace"] == "Trace"
+    assert entries["zh-CN"]["tab_trace"] == "轨迹"
 
 
 def test_read_viewer_template_embeds_i18n_before_main_script() -> None:

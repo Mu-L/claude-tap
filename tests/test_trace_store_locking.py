@@ -140,7 +140,7 @@ def test_read_paths_use_short_lived_connections(tmp_path: Path) -> None:
     reader_store = TraceStore(db_path)
     assert [row["id"] for row in reader_store.list_session_rows()] == [session_id]
     assert reader_store.load_records(session_id) == [_record(1)]
-    assert reader_store.dashboard_snapshot()[session_id][1] == 1
+    assert reader_store.dashboard_snapshot()[session_id][0] == 1
     assert getattr(reader_store._tls, "conn", None) is None
 
 

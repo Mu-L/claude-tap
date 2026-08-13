@@ -1,14 +1,17 @@
 """Enrich Cursor transcript records from local Cursor IDE / CLI state.
 
-Agent transcript JSONL files do not include model or billed token usage.
-Claude-tap recovers what it can from:
+Agent transcript JSONL files do not include model, billed token usage, or the
+request system prompt. Claude-tap recovers what it can from:
 
 1. IDE ``state.vscdb`` ``composerData:{uuid}.modelConfig.modelName``
 2. CLI ``~/.cursor/chats/*/{uuid}/store.db`` meta ``lastUsedModel``
 3. ``~/.cursor/ai-tracking/ai-code-tracking.db`` ``ai_code_hashes.model``
+4. CLI ``store.db`` JSON blobs with ``role=system`` (system prompt text only)
 
 Billed per-turn ``input_tokens`` / ``output_tokens`` are not available locally.
 ``context_tokens_used`` is a context-window estimate only, not API usage.
+Original tool schemas are not stored as JSON; those are reconstructed from
+observed ``tool_use`` blocks elsewhere.
 """
 
 from __future__ import annotations
@@ -163,6 +166,73 @@ def lookup_composer_meta(
         context_token_limit=context_limit,
         source="composerData",
     )
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str) and block.strip():
+            parts.append(block.strip())
+        elif isinstance(block, dict):
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def lookup_chat_store_system_prompt(
+    conversation_id: str,
+    *,
+    home: Path | None = None,
+) -> str:
+    """Best-effort system prompt from Cursor CLI ``store.db`` JSON blobs.
+
+    Transcript JSONL never stores the request system prompt. Some chat stores
+    keep a ``role=system`` JSON blob; protobuf tool catalogs are not recovered.
+    When several system blobs exist, the longest text wins.
+    """
+    if not conversation_id:
+        return ""
+    chats_root = _cursor_home(home) / "chats"
+    if not chats_root.is_dir():
+        return ""
+    best = ""
+    for store in chats_root.glob(f"*/{conversation_id}/store.db"):
+        conn = _connect_readonly(store)
+        if conn is None:
+            continue
+        try:
+            try:
+                rows = conn.execute("SELECT data FROM blobs").fetchall()
+            except sqlite3.Error as exc:
+                log.debug("chat store blob lookup failed for %s: %s", store, exc)
+                continue
+        finally:
+            conn.close()
+        for (data,) in rows:
+            if isinstance(data, str):
+                raw = data.encode("utf-8")
+            elif isinstance(data, bytes):
+                raw = data
+            else:
+                continue
+            stripped = raw.lstrip()
+            if not stripped.startswith((b"{", b"[")):
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("role") != "system":
+                continue
+            text = _message_text(obj.get("content"))
+            if len(text) > len(best):
+                best = text
+    return best
 
 
 def lookup_chat_store_model(

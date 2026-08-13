@@ -180,7 +180,7 @@ def list_trace_agents(
     return sorted(buckets.values(), key=lambda item: (item["label"].lower(), item["key"]))
 
 
-def dashboard_trace_snapshot() -> dict[str, tuple[str, int, str]]:
+def dashboard_trace_snapshot() -> dict[str, tuple[int, str]]:
     """Return a cheap SQLite snapshot for dashboard refresh detection."""
     store = ensure_trace_store()
     return store.dashboard_snapshot()

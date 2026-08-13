@@ -719,6 +719,9 @@ def test_dashboard_rejects_missing_session_ids(trace_db) -> None:
     assert "session-list" in template
     assert "lang-select" in template
     assert "DASHBOARD_I18N" in template
+    assert 'tab_trace: "Trace"' in template
+    assert 'tab_trace: "轨迹"' in template
+    assert 'metric_traces: "轨迹数"' in template
     assert 'data-i18n="table_first_message"' in template
     assert "export_jsonl" in template
     assert 'export_compact: "Export JSON"' in template
@@ -747,6 +750,8 @@ def test_dashboard_detail_navigation_uses_lazy_shell_route() -> None:
     assert "function refreshForFilters()" in template
     assert 'state.view === "detail" && state.selectedSessionId' in template
     assert "const detailLoaded = state.detailSessionId === state.selectedSessionId" in template
+    assert "refreshDetail || selectedFingerprint !== state.detailFingerprint" in template
+    assert "silent: true" in template
     assert "updateDetailSessionSummary(selected)" in template
     assert "updateDetailI18n(state.detailSession)" in template
     assert "knownTotal > previousTotal && previousTotal <= loadedRecords" in template

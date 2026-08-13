@@ -206,7 +206,7 @@ class LiveViewerServer:
         self._shutdown_event = asyncio.Event()
         self._stop_lock = asyncio.Lock()
         self._dashboard_watch_task: asyncio.Task | None = None
-        self._dashboard_snapshot: dict[str, tuple[str, int, str]] = {}
+        self._dashboard_snapshot: dict[str, tuple[int, str]] = {}
         self._dashboard_quit_token = secrets.token_urlsafe(32)
 
     async def start(self) -> int:

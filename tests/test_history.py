@@ -212,6 +212,47 @@ def test_append_log_refreshes_active_session_heartbeat(trace_db) -> None:
     assert row["status"] == "active"
 
 
+def test_append_log_does_not_change_dashboard_snapshot(trace_db) -> None:
+    store = get_trace_store()
+    session_id = store.create_session(client="claude", proxy_mode="reverse")
+    before = store.dashboard_snapshot()
+
+    store.append_log(session_id, "proxy still alive", logged_at="12:00:00")
+
+    assert store.dashboard_snapshot() == before
+    assert before[session_id] == (0, "active")
+
+
+def test_append_record_changes_dashboard_snapshot(trace_db) -> None:
+    store = get_trace_store()
+    session_id = store.create_session(client="claude", proxy_mode="reverse")
+    before = store.dashboard_snapshot()
+
+    store.append_record(session_id, {"request": {"body": {}}, "response": {"status": 200, "body": {}}})
+
+    after = store.dashboard_snapshot()
+    assert after != before
+    assert after[session_id] == (1, "active")
+
+
+def test_replace_record_payloads_rewrites_json_without_changing_snapshot(trace_db) -> None:
+    store = get_trace_store()
+    session_id = store.create_session(client="cursor", proxy_mode="transcript")
+    store.append_record(
+        session_id,
+        {"request": {"body": {"messages": [{"role": "user", "content": "hi"}]}}, "response": {"body": {}}},
+    )
+    before = store.dashboard_snapshot()
+    records = store.load_records(session_id)
+    records[0]["request"]["body"]["tools"] = [{"name": "Glob"}]
+
+    assert store.replace_record_payloads(session_id, records) == 1
+    assert store.load_records(session_id)[0]["request"]["body"]["tools"] == [{"name": "Glob"}]
+    assert store.dashboard_snapshot() == before
+    assert store.replace_record_payloads(session_id, []) == 0
+    assert store.load_records(session_id)[0]["request"]["body"]["tools"] == [{"name": "Glob"}]
+
+
 def test_finalize_session_refreshes_cached_summary_timestamp(trace_db) -> None:
     store = get_trace_store()
     session_id = store.create_session(client="claude", proxy_mode="reverse")

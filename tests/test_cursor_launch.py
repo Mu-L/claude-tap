@@ -13,6 +13,7 @@ from claude_tap.cursor_transcript import (
     CursorTranscriptWatcher,
     _cursor_project_slug,
     _load_transcript,
+    backfill_cursor_transcript_request_fields,
     build_cursor_transcript_records,
     find_cursor_transcripts,
     import_cursor_transcripts,
@@ -220,6 +221,14 @@ async def test_import_cursor_transcripts_preserves_tool_uses(trace_db, tmp_path:
         assert records[1]["request"]["path"].endswith("/turn/1/step/2")
         assert records[2]["request"]["path"].endswith("/turn/1/step/3")
         assert records[1]["request"]["body"]["messages"][0]["content"] == "inspect files"
+
+        tools = records[0]["request"]["body"]["tools"]
+        assert [tool["name"] for tool in tools] == ["Shell", "ReadFile"]
+        assert tools[0]["input_schema"]["properties"]["command"] == {"type": "string"}
+        assert tools[0]["input_schema"]["properties"]["working_directory"] == {"type": "string"}
+        assert tools[1]["input_schema"]["properties"]["path"] == {"type": "string"}
+        assert records[1]["request"]["body"]["tools"] == tools
+        assert records[2]["request"]["body"]["tools"] == tools
 
         content = records[0]["response"]["body"]["content"]
         assert content[0] == {"type": "text", "text": "I will inspect the workspace."}
@@ -783,3 +792,145 @@ async def test_watcher_skips_user_only_transcript_until_assistant(trace_db, tmp_
     )
     assert await watcher.sync_once() == 1
     watcher.close()
+
+
+def _legacy_cursor_record(conversation_id: str) -> dict:
+    body: dict = {"messages": [{"role": "user", "content": "inspect"}]}
+    return {
+        "transport": "cursor-transcript",
+        "capture": {"cursor_transcript_id": conversation_id, "client": "cursor"},
+        "request": {"method": "CURSOR_TRANSCRIPT", "path": "/cursor/transcript/x/turn/1/step/1", "body": body},
+        "response": {
+            "status": 200,
+            "body": {
+                "content": [
+                    {"type": "tool_use", "name": "Glob", "input": {"glob_pattern": "**/*.py"}},
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {
+                            "path": "/tmp/a.py",
+                            "limit": 10,
+                            "offset": 1.5,
+                            "ok": True,
+                            "tags": ["py"],
+                            "opts": {"x": 1},
+                            "unused": None,
+                        },
+                    },
+                ]
+            },
+        },
+    }
+
+
+def test_backfill_cursor_transcript_request_fields_writes_tools_and_system(trace_db, tmp_path: Path) -> None:
+    conversation_id = "backfill-session"
+    store_db = tmp_path / ".cursor" / "chats" / "ws" / conversation_id / "store.db"
+    store_db.parent.mkdir(parents=True)
+    import sqlite3
+
+    conn = sqlite3.connect(store_db)
+    conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+    conn.execute(
+        "INSERT INTO blobs(id, data) VALUES (?, ?)",
+        ("sys", json.dumps({"role": "system", "content": "You are Cursor Grok for backfill."}).encode()),
+    )
+    conn.commit()
+    conn.close()
+
+    from claude_tap.trace_store import get_trace_store
+
+    store = get_trace_store()
+    session_id = store.create_session(client="cursor", proxy_mode="transcript")
+    store.append_record(session_id, _legacy_cursor_record(conversation_id))
+    store.append_record(
+        session_id,
+        {"transport": "cursor-transcript", "request": {"body": None}, "response": {"body": {}}},
+    )
+    store.append_record(
+        session_id,
+        {"transport": "http", "request": {"body": {}}, "response": {"body": {}}},
+    )
+    other_id = store.create_session(client="claude", proxy_mode="reverse")
+    store.append_record(
+        other_id,
+        {"request": {"body": {"messages": [{"role": "user", "content": "hi"}]}}, "response": {"body": {}}},
+    )
+
+    updated = backfill_cursor_transcript_request_fields(store, home=tmp_path)
+    assert updated == 1
+    record = store.load_records(session_id)[0]
+    tools = record["request"]["body"]["tools"]
+    assert [tool["name"] for tool in tools] == ["Glob", "Read"]
+    assert tools[0]["input_schema"]["properties"]["glob_pattern"] == {"type": "string"}
+    assert tools[1]["input_schema"]["properties"]["limit"] == {"type": "integer"}
+    assert tools[1]["input_schema"]["properties"]["offset"] == {"type": "number"}
+    assert tools[1]["input_schema"]["properties"]["ok"] == {"type": "boolean"}
+    assert tools[1]["input_schema"]["properties"]["tags"] == {"type": "array"}
+    assert tools[1]["input_schema"]["properties"]["opts"] == {"type": "object"}
+    assert record["request"]["body"]["system"] == "You are Cursor Grok for backfill."
+    assert "tools" not in store.load_records(other_id)[0]["request"]["body"]
+    assert backfill_cursor_transcript_request_fields(store, home=tmp_path) == 0
+
+
+@pytest.mark.asyncio
+async def test_cursor_watcher_backfills_existing_records_on_first_sync(trace_db, tmp_path: Path) -> None:
+    conversation_id = "watcher-backfill"
+    from claude_tap.trace_store import get_trace_store
+
+    store = get_trace_store()
+    session_id = store.create_session(client="cursor", proxy_mode="transcript")
+    store.append_record(session_id, _legacy_cursor_record(conversation_id))
+    snapshot = store.dashboard_snapshot()
+
+    watcher = CursorTranscriptWatcher(since=0, home=tmp_path, store=store)
+    try:
+        assert await watcher.sync_once() == 0
+        record = store.load_records(session_id)[0]
+        assert record["request"]["body"]["tools"][0]["name"] == "Glob"
+        assert store.dashboard_snapshot() == snapshot
+        assert await watcher.sync_once() == 0
+    finally:
+        watcher.close()
+
+
+@pytest.mark.asyncio
+async def test_cursor_transcript_imports_system_prompt_from_chat_store(trace_db, tmp_path: Path) -> None:
+    cursor_session = "system-session"
+    transcript = _transcript_path(tmp_path, "project-one", cursor_session)
+    _write_transcript(
+        transcript,
+        [
+            {"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            {"role": "assistant", "message": {"content": [{"type": "text", "text": "yo"}]}},
+        ],
+    )
+    store_db = tmp_path / ".cursor" / "chats" / "ws" / cursor_session / "store.db"
+    store_db.parent.mkdir(parents=True)
+    import sqlite3
+
+    conn = sqlite3.connect(store_db)
+    conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+    conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?, ?)",
+        ("0", json.dumps({"lastUsedModel": "grok-4.6"}).encode().hex()),
+    )
+    conn.execute(
+        "INSERT INTO blobs(id, data) VALUES (?, ?)",
+        ("sys", json.dumps({"role": "system", "content": "Imported Cursor system prompt."}).encode()),
+    )
+    conn.commit()
+    conn.close()
+
+    from claude_tap.trace_store import get_trace_store
+
+    store = get_trace_store()
+    watcher = await import_cursor_transcripts(since=0, home=tmp_path, store=store)
+    try:
+        record = store.load_records(watcher.session_ids[0])[0]
+        assert record["request"]["body"]["system"] == "Imported Cursor system prompt."
+        assert record["request"]["body"]["model"] == "grok-4.6"
+    finally:
+        watcher.close()

@@ -213,6 +213,61 @@ function getRequestTools(body) {
   return uniqueToolsByDisplayName([...direct, ...responsesAdditional]);
 }
 
+function jsonSchemaTypeFromValue(value) {
+  if (value === null || value === undefined) return 'string';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'integer' : 'number';
+  if (typeof value === 'object') return 'object';
+  return typeof value;
+}
+
+function mergeObservedToolUse(byName, block) {
+  if (!block || block.type !== 'tool_use' || typeof block.name !== 'string' || !block.name) return;
+  const existing = byName.get(block.name) || {
+    name: block.name,
+    input_schema: { type: 'object', properties: {} },
+  };
+  const input = block.input && typeof block.input === 'object' && !Array.isArray(block.input) ? block.input : {};
+  const props = existing.input_schema.properties;
+  for (const key of Object.keys(input)) {
+    if (!props[key]) props[key] = { type: jsonSchemaTypeFromValue(input[key]) };
+  }
+  byName.set(block.name, existing);
+}
+
+function cursorTranscriptConversationKey(entry) {
+  const captured = entry?.capture?.cursor_transcript_id;
+  if (typeof captured === 'string' && captured.trim()) return captured.trim();
+  const path = String(entry?.request?.path || '');
+  const match = path.match(/^\/cursor\/transcript\/([^/]+)\//);
+  return match ? match[1] : '';
+}
+
+function cursorTranscriptObservedTools(current) {
+  const isCursor = current?.transport === 'cursor-transcript'
+    || String(current?.request?.path || '').startsWith('/cursor/transcript/');
+  if (!isCursor) return [];
+  const byName = new Map();
+  const currentKey = cursorTranscriptConversationKey(current);
+  const pool = Array.isArray(entries) && entries.length ? entries : (current ? [current] : []);
+  for (const entry of pool) {
+    if (entry && entry.transport && entry.transport !== 'cursor-transcript') continue;
+    if (currentKey && cursorTranscriptConversationKey(entry) !== currentKey) continue;
+    const content = getResponsePayload(entry)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) mergeObservedToolUse(byName, block);
+  }
+  return [...byName.values()];
+}
+
+function getDetailTools(entry, reqBody, respPayload) {
+  const requestTools = getRequestTools(reqBody);
+  if (requestTools.length) return requestTools;
+  const observed = cursorTranscriptObservedTools(entry);
+  if (observed.length) return observed;
+  return getRequestTools(respPayload);
+}
+
 function hasDisplayContent(content) {
   if (typeof content === 'string') return content.trim().length > 0;
   if (!Array.isArray(content)) return content !== undefined && content !== null;

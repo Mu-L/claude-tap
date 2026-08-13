@@ -7,6 +7,12 @@ Connect/protobuf and are not treated as the conversation source.
 Local transcript JSONL rows only contain ``role`` + ``message`` blocks. Model is
 recovered from Cursor IDE/CLI local state when available (see
 ``cursor_metadata``). Billed API token usage is not present locally.
+
+Cursor does not persist the request ``tools`` catalog (tool definitions /
+schemas). Claude-tap reconstructs a catalog from observed ``tool_use`` names
+and argument keys so the viewer can show Tools in the request. Existing
+sessions are backfilled the first time the transcript watcher syncs. System
+prompt text is recovered from Cursor ``store.db`` JSON blobs when present.
 """
 
 from __future__ import annotations
@@ -19,9 +25,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_tap.cursor_metadata import CursorConversationMeta, resolve_cursor_conversation_meta
+from claude_tap.cursor_metadata import (
+    CursorConversationMeta,
+    lookup_chat_store_system_prompt,
+    resolve_cursor_conversation_meta,
+)
 from claude_tap.trace import TraceWriter, create_trace_writer
-from claude_tap.trace_store import TraceStore, get_trace_store
+from claude_tap.trace_store import SessionQuery, TraceStore, get_trace_store
 
 log = logging.getLogger("claude-tap")
 
@@ -149,6 +159,154 @@ def _assistant_steps(messages: list[tuple[str, list[dict]]]) -> list[tuple[str, 
     return steps
 
 
+def _json_schema_type(value: object) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"
+
+
+def _tools_from_tool_use_blocks(block_lists: list[list[dict]]) -> list[dict]:
+    """Reconstruct an Anthropic-shaped tools catalog from observed tool_use blocks.
+
+    Cursor transcripts never include the original request tool definitions.
+    Names and property keys come from assistant ``tool_use`` calls, which is the
+    closest local approximation of the catalog that was sent to the model.
+    """
+    properties_by_name: dict[str, dict[str, dict[str, str]]] = {}
+    order: list[str] = []
+    for blocks in block_lists:
+        for block in blocks:
+            if block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if name not in properties_by_name:
+                properties_by_name[name] = {}
+                order.append(name)
+            tool_input = block.get("input")
+            if not isinstance(tool_input, dict):
+                continue
+            for key, value in tool_input.items():
+                if not isinstance(key, str) or key in properties_by_name[name]:
+                    continue
+                properties_by_name[name][key] = {"type": _json_schema_type(value)}
+    return [
+        {
+            "name": name,
+            "input_schema": {
+                "type": "object",
+                "properties": properties_by_name[name],
+            },
+        }
+        for name in order
+    ]
+
+
+def _tools_from_steps(steps: list[tuple[str, list[dict], int, int]]) -> list[dict]:
+    """Reconstruct a tools catalog from assistant steps in a Cursor transcript."""
+    return _tools_from_tool_use_blocks([blocks for _user_text, blocks, _turn, _step in steps])
+
+
+def _response_content_blocks(record: dict) -> list[dict]:
+    content = ((record.get("response") or {}).get("body") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
+def _tools_from_records(records: list[dict]) -> list[dict]:
+    return _tools_from_tool_use_blocks(
+        [_response_content_blocks(record) for record in records if record.get("transport") == "cursor-transcript"]
+    )
+
+
+def _has_request_tools(body: dict) -> bool:
+    tools = body.get("tools")
+    return isinstance(tools, list) and any(isinstance(tool, dict) for tool in tools)
+
+
+def _has_request_system(body: dict) -> bool:
+    system = body.get("system")
+    return isinstance(system, str) and bool(system.strip())
+
+
+def _cursor_transcript_id_from_records(records: list[dict]) -> str:
+    for record in records:
+        capture = record.get("capture")
+        if not isinstance(capture, dict):
+            continue
+        conversation_id = capture.get("cursor_transcript_id")
+        if isinstance(conversation_id, str) and conversation_id.strip():
+            return conversation_id.strip()
+    return ""
+
+
+def backfill_cursor_transcript_request_fields(
+    store: TraceStore,
+    *,
+    home: Path | None = None,
+) -> int:
+    """Insert reconstructed tools/system into stored Cursor transcript requests.
+
+    Existing sessions were captured before request catalogs were reconstructed.
+    This rewrites ``request.body.tools`` from observed ``tool_use`` blocks and,
+    when Cursor's local chat store still has it, ``request.body.system``.
+    """
+    updated = 0
+    for row in store.list_session_rows(query=SessionQuery(agent_clients=("cursor",))):
+        session_id = str(row["id"])
+        records = store.load_records(session_id)
+        if not any(record.get("transport") == "cursor-transcript" for record in records):
+            continue
+        tools = _tools_from_records(records)
+        system = ""
+        conversation_id = _cursor_transcript_id_from_records(records)
+        if conversation_id:
+            system = lookup_chat_store_system_prompt(conversation_id, home=home)
+        rewritten: list[dict] = []
+        changed = False
+        session_updated = 0
+        for record in records:
+            if record.get("transport") != "cursor-transcript":
+                rewritten.append(record)
+                continue
+            request = record.get("request")
+            body = request.get("body") if isinstance(request, dict) else None
+            if not isinstance(body, dict):
+                rewritten.append(record)
+                continue
+            next_body = dict(body)
+            record_changed = False
+            if tools and not _has_request_tools(next_body):
+                next_body["tools"] = tools
+                record_changed = True
+            if system and not _has_request_system(next_body):
+                next_body["system"] = system
+                record_changed = True
+            if not record_changed:
+                rewritten.append(record)
+                continue
+            next_request = dict(request)
+            next_request["body"] = next_body
+            rewritten.append({**record, "request": next_request})
+            changed = True
+            session_updated += 1
+        if changed and store.replace_record_payloads(session_id, rewritten):
+            updated += session_updated
+    return updated
+
+
 def _normalize_assistant_blocks(blocks: list[dict], *, turn_index: int) -> list[dict]:
     normalized: list[dict] = []
     for index, block in enumerate(blocks, start=1):
@@ -207,6 +365,7 @@ def build_cursor_transcript_records(
     skip_steps: int = 0,
     model: str = "",
     conversation_meta: CursorConversationMeta | None = None,
+    system: str = "",
 ) -> tuple[int, list[dict]]:
     """Build Anthropic-shaped synthetic records from a Cursor transcript.
 
@@ -214,10 +373,10 @@ def build_cursor_transcript_records(
     later by :meth:`TraceWriter.write_next_turn`.
     """
     session_id = transcript_path.stem
-    steps = _assistant_steps(_load_transcript(transcript_path))
-    total_steps = len(steps)
-    if skip_steps > 0:
-        steps = steps[skip_steps:]
+    all_steps = _assistant_steps(_load_transcript(transcript_path))
+    total_steps = len(all_steps)
+    reconstructed_tools = _tools_from_steps(all_steps)
+    steps = all_steps[skip_steps:] if skip_steps > 0 else all_steps
     records: list[dict] = []
     timestamp = datetime.now(timezone.utc).isoformat()
     meta = conversation_meta or CursorConversationMeta()
@@ -231,6 +390,10 @@ def build_cursor_transcript_records(
             "cursor_step": cursor_step,
             "messages": [{"role": "user", "content": user_text}],
         }
+        if reconstructed_tools:
+            body["tools"] = reconstructed_tools
+        if system.strip():
+            body["system"] = system.strip()
         if model_name:
             body["model"] = model_name
         if meta.context_tokens_used is not None:
@@ -318,6 +481,8 @@ class CursorTranscriptWatcher:
         self._imported_paths: set[str] = set()
         self._seen_sizes: dict[str, int] = {}
         self._conversation_meta: dict[str, CursorConversationMeta] = {}
+        self._system_prompts: dict[str, str] = {}
+        self._request_fields_backfilled = False
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._sync_errors = 0
@@ -341,6 +506,16 @@ class CursorTranscriptWatcher:
                 meta.context_token_limit,
             )
         return meta
+
+    def _system_for(self, transcript_path: Path) -> str:
+        key = transcript_path.stem
+        cached = self._system_prompts.get(key)
+        if cached:
+            return cached
+        system = lookup_chat_store_system_prompt(key, home=self._home)
+        if system:
+            self._system_prompts[key] = system
+        return system
 
     @property
     def session_ids(self) -> list[str]:
@@ -437,6 +612,11 @@ class CursorTranscriptWatcher:
 
     async def sync_once(self) -> int:
         """Import any new transcript steps since the last sync."""
+        if not self._request_fields_backfilled:
+            backfilled = backfill_cursor_transcript_request_fields(self._store, home=self._home)
+            if backfilled:
+                log.info("Backfilled Cursor request tools/system on %s stored records", backfilled)
+            self._request_fields_backfilled = True
         imported = 0
         for transcript_path in find_cursor_transcripts(since=self._since, home=self._home):
             key = str(transcript_path)
@@ -447,6 +627,7 @@ class CursorTranscriptWatcher:
                 skip_steps=skip_steps,
                 model=self._model,
                 conversation_meta=self._meta_for(transcript_path),
+                system=self._system_for(transcript_path),
             )
             if not records:
                 # Keep skip count aligned even when the file has only unfinished user turns.

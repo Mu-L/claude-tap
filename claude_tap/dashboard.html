@@ -1308,7 +1308,7 @@ const DASHBOARD_I18N = {
     quitting_dashboard: "正在停止",
     dashboard_quit_failed: "无法停止面板服务：{error}",
     dashboard: "面板",
-    trace_history_sessions: "trace 历史会话",
+    trace_history_sessions: "轨迹历史会话",
     dashboard_title: "对话日志",
     filter_date: "日期",
     filter_status: "状态",
@@ -1329,12 +1329,12 @@ const DASHBOARD_I18N = {
 	    loading_more_sessions: "正在加载更多会话...",
 	    sessions_loaded: "正在展示 {shown} / {total} 个会话。",
 	    metric_threads: "会话数",
-    metric_traces: "Trace 数",
+    metric_traces: "轨迹数",
     metric_error_rate: "错误率",
     metric_total_tokens: "总 Token",
     table_start_time: "开始时间",
     table_first_message: "首条用户 Prompt",
-    table_traces: "Trace",
+    table_traces: "轨迹",
     table_tokens: "Token",
     table_model: "模型",
     table_agent: "Agent",
@@ -1343,7 +1343,7 @@ const DASHBOARD_I18N = {
     table_actions: "操作",
     all_dates: "全部日期",
     all_agents: "全部 Agent",
-    no_matching_sessions: "没有匹配的 trace 会话。",
+    no_matching_sessions: "没有匹配的轨迹会话。",
     loading_sessions: "正在加载会话...",
     loading_session: "正在加载会话详情...",
     loading_viewer: "正在加载 viewer...",
@@ -1356,10 +1356,10 @@ const DASHBOARD_I18N = {
     details: "详情",
     delete_session: "删除",
 	    delete_session_title: "删除所选会话？",
-	    delete_session_message: "这会删除所选 trace 会话已捕获的记录和日志。",
+	    delete_session_message: "这会删除所选轨迹会话已捕获的记录和日志。",
 	    delete_session_warning: "此操作不可撤销。",
     delete_live_session_title: "实时会话不能删除",
-    delete_active_session_title: "这个 trace 仍在写入",
+    delete_active_session_title: "这个轨迹仍在写入",
     cancel: "取消",
 	    confirm_delete: "删除",
 	    deleting_session: "正在删除...",
@@ -1390,7 +1390,7 @@ const DASHBOARD_I18N = {
     cache_write: "缓存写",
     total: "总计",
 	    tab_default: "默认",
-	    tab_trace: "Trace",
+	    tab_trace: "轨迹",
 	    full_viewer: "完整 Viewer",
     request_empty: "请求体里没有面向用户的消息。",
     response_empty: "响应体里没有 assistant 文本。",
@@ -1658,10 +1658,12 @@ function updateTracePathBar(session = null) {
   `;
 }
 
-	async function refreshSessions({preserveSelection = true, refreshDetail = false} = {}) {
+	async function refreshSessions({preserveSelection = true, refreshDetail = false, silent = false} = {}) {
 	  const requestId = state.sessionRequestId + 1;
 	  state.sessionRequestId = requestId;
-	  setDashboardLoading(true);
+	  if (!silent || !state.sessions.length) {
+	    setDashboardLoading(true);
+	  }
   if (!state.sessions.length) {
     renderSessions();
 	  }
@@ -1702,8 +1704,10 @@ function updateTracePathBar(session = null) {
       const selected = state.sessions.find(session => session.id === state.selectedSessionId);
       const detailLoaded = state.detailSessionId === state.selectedSessionId;
       const selectedFingerprint = selected ? sessionDetailFingerprint(selected) : "";
-      if (!detailLoaded || refreshDetail || !selected || (selected && selectedFingerprint !== state.detailFingerprint)) {
+      if (!detailLoaded || !selected) {
         if (!detailLoaded) showDetailLoading(state.selectedSessionId);
+        await loadSession(state.selectedSessionId, {preserveLoaded: true});
+      } else if (refreshDetail || selectedFingerprint !== state.detailFingerprint) {
         await loadSession(state.selectedSessionId, {preserveLoaded: true});
       } else if (selected) {
         updateDetailSessionSummary(selected);
@@ -2420,18 +2424,18 @@ function partsText(parts) {
 	  });
 	  events.addEventListener("refresh", () => {
 	    if (state.quittingDashboard) return;
-	    refreshSessions({preserveSelection: true}).catch(console.error);
+	    refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	  });
 	  events.addEventListener("record", () => {
 	    if (state.quittingDashboard) return;
-	    refreshSessions({preserveSelection: true}).catch(console.error);
+	    refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	  });
 	  events.addEventListener("error", () => {
 	    if (state.quittingDashboard) return;
 	    $("#live-label").textContent = t("live_reconnecting");
 	    if (!state.pollingIntervalId) {
 	      state.pollingIntervalId = setInterval(() => {
-	        refreshSessions({preserveSelection: true}).catch(console.error);
+	        refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	      }, 5000);
 	    }
 	  });
@@ -2520,7 +2524,7 @@ $("#lang-select").addEventListener("change", event => setLang(event.target.value
 	  $("#detail").innerHTML = `<div class="empty">${esc(t("unable_load_dashboard", {error: error.message}))}</div>`;
 	});
 	if (!hasDashboardEvents) {
-	  setInterval(() => refreshSessions({preserveSelection: true}).catch(console.error), 5000);
+	  setInterval(() => refreshSessions({preserveSelection: true, silent: true}).catch(console.error), 5000);
 	}
 </script>
 </body>

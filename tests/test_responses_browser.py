@@ -412,6 +412,112 @@ def test_viewer_keeps_repeated_cursor_prompts_in_separate_groups(responses_page)
     assert result["stubTurn"] == 2
 
 
+@pytest.fixture(scope="module")
+def cursor_transcript_tools_html_file() -> Path:
+    trace_path = Path(tempfile.mktemp(suffix=".jsonl"))
+    html_path = Path(tempfile.mktemp(suffix=".html"))
+    records = [
+        {
+            "request_id": "cursor_step_1",
+            "turn": 1,
+            "transport": "cursor-transcript",
+            "request": {
+                "method": "CURSOR_TRANSCRIPT",
+                "path": "/cursor/transcript/abc/turn/1/step/1",
+                "body": {
+                    "cursor_turn": 1,
+                    "cursor_step": 1,
+                    "messages": [{"role": "user", "content": "inspect files"}],
+                },
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "content": [
+                        {"type": "text", "text": "I will inspect the workspace."},
+                        {
+                            "type": "tool_use",
+                            "id": "cursor_tool_1_2",
+                            "name": "Glob",
+                            "input": {"glob_pattern": "README*"},
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "cursor_tool_1_3",
+                            "name": "Shell",
+                            "input": {"command": "ls"},
+                        },
+                    ]
+                },
+            },
+        },
+        {
+            "request_id": "cursor_step_2",
+            "turn": 2,
+            "transport": "cursor-transcript",
+            "request": {
+                "method": "CURSOR_TRANSCRIPT",
+                "path": "/cursor/transcript/abc/turn/1/step/2",
+                "body": {
+                    "cursor_turn": 1,
+                    "cursor_step": 2,
+                    "messages": [{"role": "user", "content": "inspect files"}],
+                },
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "cursor_tool_2_1",
+                            "name": "Read",
+                            "input": {"path": "README.md"},
+                        }
+                    ]
+                },
+            },
+        },
+    ]
+    trace_path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    _generate_html_viewer(trace_path, html_path)
+    yield html_path
+    trace_path.unlink(missing_ok=True)
+    html_path.unlink(missing_ok=True)
+
+
+@pytest.fixture()
+def cursor_transcript_tools_page(cursor_transcript_tools_html_file: Path):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(f"file://{cursor_transcript_tools_html_file}", timeout=10000)
+        page.wait_for_selector(".sidebar-item", timeout=5000)
+        yield page
+        browser.close()
+
+
+def test_viewer_shows_reconstructed_cursor_tools_in_default_and_trace(cursor_transcript_tools_page) -> None:
+    page = cursor_transcript_tools_page
+    page.locator(".sidebar-item").first.click()
+    page.wait_for_selector("#detail .section", timeout=5000)
+
+    page.locator(".section-header", has_text="Tools").click()
+    tools_text = page.locator(".section", has_text="Tools").first.inner_text()
+    assert "Glob" in tools_text
+    assert "Shell" in tools_text
+    assert "Read" in tools_text
+
+    page.locator(".detail-tab", has_text="Trace").click()
+    page.wait_for_selector(".trace-code", timeout=5000)
+    trace_input = page.locator(".trace-code").first.inner_text()
+    assert "Glob" in trace_input
+    assert "Shell" in trace_input
+    assert "Read" in trace_input
+
+
 def test_viewer_collapses_cursor_transcript_paths_in_filter(responses_page) -> None:
     result = responses_page.evaluate(
         """() => {

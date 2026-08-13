@@ -9,6 +9,7 @@ from claude_tap.cursor_metadata import (
     _default_cursor_state_db,
     lookup_ai_tracking_model,
     lookup_chat_store_model,
+    lookup_chat_store_system_prompt,
     lookup_composer_meta,
     resolve_cursor_conversation_meta,
 )
@@ -26,7 +27,7 @@ def _write_composer_db(path: Path, conversation_id: str, payload: dict) -> None:
     conn.close()
 
 
-def _write_chat_store(path: Path, meta: dict) -> None:
+def _write_chat_store(path: Path, meta: dict, blobs: list[dict | bytes] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
@@ -34,6 +35,13 @@ def _write_chat_store(path: Path, meta: dict) -> None:
         "INSERT INTO meta(key, value) VALUES (?, ?)",
         ("0", json.dumps(meta).encode("utf-8").hex()),
     )
+    conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+    for index, blob in enumerate(blobs or []):
+        if isinstance(blob, (bytes, str)):
+            data = blob
+        else:
+            data = json.dumps(blob).encode("utf-8")
+        conn.execute("INSERT INTO blobs(id, data) VALUES (?, ?)", (f"blob-{index}", data))
     conn.commit()
     conn.close()
 
@@ -220,3 +228,34 @@ def test_resolve_falls_back_to_ai_tracking(tmp_path: Path) -> None:
     )
     assert meta.model == "ai-track-only"
     assert meta.source == "ai-tracking"
+
+
+def test_lookup_chat_store_system_prompt_picks_longest_json_blob(tmp_path: Path) -> None:
+    conversation_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    store = tmp_path / ".cursor" / "chats" / "workspace" / conversation_id / "store.db"
+    _write_chat_store(
+        store,
+        {"lastUsedModel": "grok-4.6"},
+        blobs=[
+            {"role": "user", "content": "ignore me"},
+            {"role": "system", "content": "short"},
+            {"role": "system", "content": [{"type": "text", "text": "You are a longer Cursor system prompt."}]},
+            '{"role":"system","content":"also-string-blob"}',
+            b"\x00not-json",
+        ],
+    )
+
+    assert lookup_chat_store_system_prompt(conversation_id, home=tmp_path) == "You are a longer Cursor system prompt."
+    assert lookup_chat_store_system_prompt("", home=tmp_path) == ""
+    assert lookup_chat_store_system_prompt("missing", home=tmp_path) == ""
+
+
+def test_lookup_chat_store_system_prompt_without_blobs_table(tmp_path: Path) -> None:
+    conversation_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    store = tmp_path / ".cursor" / "chats" / "workspace" / conversation_id / "store.db"
+    store.parent.mkdir(parents=True)
+    conn = sqlite3.connect(store)
+    conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+    conn.commit()
+    conn.close()
+    assert lookup_chat_store_system_prompt(conversation_id, home=tmp_path) == ""
