@@ -147,15 +147,24 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             uv.lock
+      - run: pip install -e ".[dev]"
+      # The cache key must hash whatever pins playwright, because the browser
+      # revision under ~/.cache/ms-playwright is chosen by the installed
+      # playwright version. Deliberately no prefix fallback — a partial hit
+      # would restore a directory missing the current revision, and the
+      # exact-key hit would still skip the post-step save, so the re-download
+      # would repeat on every run forever.
       - name: Cache Playwright browsers
+        id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
-      - run: pip install -e ".[dev]" playwright
-      - run: python -m playwright install --with-deps chromium
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pyproject.toml') }}
+      # System libraries live outside the cached path, so they are installed
+      # unconditionally; only the browser download is skipped on a cache hit.
+      - run: python -m playwright install-deps chromium
+      - if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install chromium
       - run: python -m coverage erase
       - run: python -m coverage run --append -m pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_nav_browser.py --ignore=tests/test_responses_browser.py --ignore=tests/test_search_browser.py --ignore=tests/test_perf_viewer.py --ignore=tests/test_viewer_contracts.py -x --timeout=60 -q
       - run: python -m coverage run --append -m pytest tests/test_e2e.py -q

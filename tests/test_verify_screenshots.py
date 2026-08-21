@@ -10,8 +10,11 @@ from pathlib import Path
 import pytest
 
 from claude_tap.viewer import _generate_html_viewer
+from tests.conftest import playwright_skip_reason
 
-pytest.importorskip("playwright.sync_api")
+# verify_viewer_html launches chromium, so the package alone is not enough.
+_pw_skip = playwright_skip_reason()
+pytestmark = pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "verify_screenshots.py"
 MODULE_NAME = "verify_screenshots"

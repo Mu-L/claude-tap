@@ -16,15 +16,15 @@ import pytest
 
 from claude_tap.compact_trace import build_compact_trace_bundle
 from claude_tap.viewer import _generate_html_viewer, _generate_html_viewer_from_compact_bundle, _read_viewer_template
+from tests.conftest import playwright_skip_reason
 
-pw_missing = False
 try:
     from playwright.sync_api import Page, sync_playwright  # noqa: F401
 except ImportError:
-    pw_missing = True
     Page = Any  # type: ignore[assignment,misc]
 
-pytestmark = pytest.mark.skipif(pw_missing, reason="playwright not installed")
+_pw_skip = playwright_skip_reason()
+pytestmark = pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 
 
 @dataclass(frozen=True)

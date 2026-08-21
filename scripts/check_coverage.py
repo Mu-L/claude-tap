@@ -462,6 +462,11 @@ def _load_viewer_contract_helpers() -> tuple[Any, Any, Any]:
         raise RuntimeError(f"Could not load viewer contract helpers from {contracts_path}")
     contracts = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = contracts
+    # Loading by path bypasses pytest's rootdir insertion, so `tests.conftest`
+    # imports inside the contract file would not resolve. Test modules here use
+    # that form, so put the repo root on the path before executing.
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     spec.loader.exec_module(contracts)
     return contracts._contract_cases, contracts._generate_case_html, contracts._compact_contract_records
 

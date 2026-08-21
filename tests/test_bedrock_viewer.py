@@ -8,12 +8,9 @@ import json
 import pytest
 
 from claude_tap.viewer import _normalize_record_for_viewer
+from tests.conftest import playwright_skip_reason
 
-pw_missing = False
-try:
-    from playwright.sync_api import sync_playwright  # noqa: F401
-except ImportError:
-    pw_missing = True
+_pw_skip = playwright_skip_reason()
 
 
 def _bedrock_frame(payload: dict) -> str:
@@ -181,7 +178,7 @@ def test_normalize_record_for_viewer_preserves_bedrock_reasoning_signature() -> 
     ]
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_bedrock_invoke_path_is_primary_filter(tmp_path) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -236,7 +233,7 @@ def test_bedrock_invoke_path_is_primary_filter(tmp_path) -> None:
     assert "+3" in more_text
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_bedrock_billing_header_does_not_become_task_label(tmp_path) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -287,7 +284,7 @@ def test_bedrock_billing_header_does_not_become_task_label(tmp_path) -> None:
     assert label == "Claude Agent"
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_bedrock_converse_response_output_and_usage_render(tmp_path) -> None:
     from playwright.sync_api import sync_playwright
 

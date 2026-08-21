@@ -11,13 +11,10 @@ from pathlib import Path
 
 import pytest
 
-pw_missing = False
-try:
-    from playwright.sync_api import sync_playwright  # noqa: F401
-except ImportError:
-    pw_missing = True
+from tests.conftest import playwright_skip_reason
 
-pytestmark = pytest.mark.skipif(pw_missing, reason="playwright not installed")
+_pw_skip = playwright_skip_reason()
+pytestmark = pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 
 LARGE_TRACE = Path(__file__).parent.parent / ".traces" / "trace_20260228_212004.jsonl"
 

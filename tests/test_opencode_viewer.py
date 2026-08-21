@@ -11,14 +11,12 @@ import json
 
 import pytest
 
-pw_missing = False
-try:
-    from playwright.sync_api import sync_playwright  # noqa: F401
-except ImportError:
-    pw_missing = True
+from tests.conftest import playwright_skip_reason
+
+_pw_skip = playwright_skip_reason()
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_opencode_prompt_is_labelled_opencode_not_claude_code(tmp_path) -> None:
     from playwright.sync_api import sync_playwright
 

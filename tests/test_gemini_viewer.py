@@ -8,12 +8,9 @@ import pytest
 
 from claude_tap.usage import normalize_usage
 from claude_tap.viewer import _extract_metadata, _extract_request_messages, _generate_html_viewer
+from tests.conftest import playwright_skip_reason
 
-pw_missing = False
-try:
-    from playwright.sync_api import sync_playwright  # noqa: F401
-except ImportError:
-    pw_missing = True
+_pw_skip = playwright_skip_reason()
 
 
 def _sse_frame(payload: dict) -> str:
@@ -242,7 +239,7 @@ def gemini_html_file() -> Path:
     html_path.unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_viewer_renders_gemini_semantic_sections(gemini_html_file: Path) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -297,7 +294,7 @@ def test_viewer_renders_gemini_semantic_sections(gemini_html_file: Path) -> None
     assert "Final OK from Gemini." in detail
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_viewer_keeps_gemini_native_paths_visible_with_chat_completions(tmp_path: Path) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -362,7 +359,7 @@ def test_viewer_keeps_gemini_native_paths_visible_with_chat_completions(tmp_path
     assert "+1 more" not in result["pathFilter"]
 
 
-@pytest.mark.skipif(pw_missing, reason="playwright not installed")
+@pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 def test_viewer_renders_direct_gemini_native_body(tmp_path: Path) -> None:
     from playwright.sync_api import sync_playwright
 

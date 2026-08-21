@@ -11,14 +11,15 @@ from pathlib import Path
 import pytest
 
 from claude_tap.viewer import _generate_html_viewer
+from tests.conftest import playwright_skip_reason
 
-pw_missing = False
 try:
-    from playwright.sync_api import sync_playwright  # noqa: F401
+    from playwright.sync_api import sync_playwright
 except ImportError:
-    pw_missing = True
+    sync_playwright = None  # type: ignore[assignment]  # unused: every test below skips
 
-pytestmark = pytest.mark.skipif(pw_missing, reason="playwright not installed")
+_pw_skip = playwright_skip_reason()
+pytestmark = pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 
 _WORD_RE = re.compile(r"[A-Za-z]{4,}")
 _STOPWORDS = {

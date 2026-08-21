@@ -11,6 +11,24 @@ from claude_tap.cli_clients import _extend_no_proxy
 from claude_tap.trace_store import get_trace_store, reset_trace_store
 
 
+def playwright_skip_reason() -> str | None:
+    """Return why browser tests cannot run here, or None when they can.
+
+    The playwright package and the chromium binary install separately, so
+    checking only the import makes a browser-less environment fail instead of
+    skip. Callers use this as a `pytest.mark.skipif` condition.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "playwright not installed"
+
+    with sync_playwright() as pw:
+        if not Path(pw.chromium.executable_path).exists():
+            return "chromium not installed (run: python -m playwright install chromium)"
+    return None
+
+
 def trace_db_path(trace_dir: str | Path) -> Path:
     return Path(trace_dir) / "claude-tap-test.sqlite3"
 

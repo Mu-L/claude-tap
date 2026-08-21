@@ -12,6 +12,7 @@ import gzip
 import ipaddress
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -256,8 +257,7 @@ def _run_test(upstream_port, store_stream_events=False):
     # Create fake claude
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_")
     fake_claude = Path(fake_bin_dir) / "claude"
-    fake_claude.write_text(FAKE_CLAUDE_SCRIPT)
-    fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_claude, FAKE_CLAUDE_SCRIPT)
 
     env = os.environ.copy()
     env["PATH"] = fake_bin_dir + ":" + env.get("PATH", "")
@@ -483,14 +483,99 @@ def _run_claude_tap(
     )
 
 
+def _write_fake_client(path: Path, script_text: str) -> None:
+    """Write `script_text` to `path` as an executable fake client.
+
+    The scripts carry a `#!/usr/bin/env python3` shebang, which resolves to
+    whatever python3 is first on PATH — on macOS that is the system 3.9, not
+    the interpreter running the tests. Any fake client importing a dependency
+    of this project (backports.zstd, tomllib) then fails on an unrelated
+    interpreter, so the script has to run on sys.executable instead.
+
+    The interpreter cannot go in the shebang directly: the kernel does not
+    split that line on quotes, so an interpreter under a directory containing
+    a space ("/Users/me/my checkout/.venv/bin/python") is truncated at the
+    space and every fake client becomes unexecutable. A `/bin/sh` trampoline
+    re-executes the quoted path, which a shell does parse, so the script works
+    wherever the checkout happens to live.
+
+    The trampoline line has to parse as both shell and python, since python
+    reads the whole file once sh has re-executed it. sh joins the two empty
+    strings onto `exec` and runs the rest of the line as a command; python sees
+    one triple-quoted string, the `#` keeping the closing quotes off the
+    command sh runs.
+    """
+    if script_text.startswith("#!"):
+        _, _, rest = script_text.partition("\n")
+        script_text = f"#!/bin/sh\n''''exec {shlex.quote(sys.executable)} \"$0\" \"$@\" # '''\n{rest}"
+    path.write_text(script_text)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
 def _create_fake_claude(script_text):
     """Write `script_text` into a temp dir as an executable 'claude' script.
     Returns the temp dir path (string)."""
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_")
-    fake_claude = Path(fake_bin_dir) / "claude"
-    fake_claude.write_text(script_text)
-    fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(Path(fake_bin_dir) / "claude", script_text)
     return fake_bin_dir
+
+
+def test_fake_clients_run_under_the_test_interpreter(tmp_path):
+    """Fake clients must not inherit `/usr/bin/env python3`.
+
+    A fake client importing a project dependency (backports.zstd, tomllib) has
+    to run on the interpreter the tests run on, otherwise it fails on whichever
+    python3 happens to be first on PATH.
+    """
+    script = tmp_path / "fake"
+    _write_fake_client(script, FAKE_CLAUDE_SCRIPT)
+    assert os.access(script, os.X_OK)
+
+    reported = subprocess.run(
+        [str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
+    )
+    assert "ModuleNotFoundError" not in reported.stderr
+
+    # Which interpreter it landed on, rather than how the file arranges to get
+    # there: the trampoline is an implementation detail, running on the test
+    # interpreter is the contract.
+    probe = tmp_path / "probe"
+    _write_fake_client(probe, "#!/usr/bin/env python3\nimport sys\nprint(sys.executable)\n")
+    landed = subprocess.run([str(probe)], capture_output=True, text=True, timeout=30)
+    assert landed.stdout.strip() == sys.executable
+    assert landed.stderr == ""
+
+
+def test_fake_clients_run_from_an_interpreter_path_containing_a_space(tmp_path, monkeypatch):
+    """A checkout under "my projects/" must not break every fake client.
+
+    The kernel does not split a shebang on quotes, so an interpreter path with
+    a space truncates there and the script becomes unexecutable. Reached here
+    through a symlink, since the real interpreter path has no space in CI.
+    """
+    spaced_dir = tmp_path / "interpreter dir"
+    spaced_dir.mkdir()
+    spaced = spaced_dir / "python"
+    spaced.symlink_to(sys.executable)
+    monkeypatch.setattr(sys, "executable", str(spaced))
+
+    script = tmp_path / "fake"
+    _write_fake_client(script, "#!/usr/bin/env python3\nprint('ran')\n")
+
+    landed = subprocess.run([str(script)], capture_output=True, text=True, timeout=30)
+    assert landed.stdout.strip() == "ran"
+    assert landed.returncode == 0
+
+
+def test_write_fake_client_preserves_a_script_without_a_shebang(tmp_path):
+    script = tmp_path / "fake"
+    _write_fake_client(script, "print('no shebang')\n")
+
+    assert script.read_text() == "print('no shebang')\n"
 
 
 def test_e2e_claude_vertex_base_url_autodetects_and_records_raw_predict():
@@ -1922,8 +2007,7 @@ def test_codex_client_reverse_proxy():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_codex_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_codex_")
     fake_codex = Path(fake_bin_dir) / "codex"
-    fake_codex.write_text(FAKE_CODEX_SCRIPT)
-    fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_codex, FAKE_CODEX_SCRIPT)
     stop = _start_fake_upstream(19242, handler)
 
     try:
@@ -2055,8 +2139,7 @@ def test_grok_client_reverse_proxy():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_grok_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_grok_")
     fake_grok = Path(fake_bin_dir) / "grok"
-    fake_grok.write_text(FAKE_GROK_SCRIPT)
-    fake_grok.chmod(fake_grok.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_grok, FAKE_GROK_SCRIPT)
     stop = _start_fake_upstream(19247, handler)
 
     try:
@@ -2186,8 +2269,7 @@ def test_dsh_client_forward_proxy_captures_local_gateway():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_dsh_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_dsh_")
     fake_dsh = Path(fake_bin_dir) / "dsh"
-    fake_dsh.write_text(FAKE_DSH_SCRIPT)
-    fake_dsh.chmod(fake_dsh.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_dsh, FAKE_DSH_SCRIPT)
     stop = _start_fake_upstream(19248, handler)
 
     try:
@@ -2295,8 +2377,7 @@ def test_kimi_client_reverse_proxy():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_kimi_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_kimi_")
     fake_kimi = Path(fake_bin_dir) / "kimi"
-    fake_kimi.write_text(FAKE_KIMI_SCRIPT)
-    fake_kimi.chmod(fake_kimi.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_kimi, FAKE_KIMI_SCRIPT)
     stop = _start_fake_upstream(19244, handler)
 
     try:
@@ -2519,8 +2600,7 @@ def test_kimi_multiturn_tool_calls_reverse_proxy():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_kimi_multiturn_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_kimi_multiturn_")
     fake_kimi = Path(fake_bin_dir) / "kimi"
-    fake_kimi.write_text(FAKE_KIMI_MULTITURN_SCRIPT)
-    fake_kimi.chmod(fake_kimi.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_kimi, FAKE_KIMI_MULTITURN_SCRIPT)
     stop = _start_fake_upstream(19245, handler)
 
     try:
@@ -2660,8 +2740,7 @@ def test_kimi_code_client_reverse_proxy():
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_kimi_code_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_kimi_code_")
     fake_kimi = Path(fake_bin_dir) / "kimi"
-    fake_kimi.write_text(FAKE_KIMI_CODE_SCRIPT)
-    fake_kimi.chmod(fake_kimi.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_kimi, FAKE_KIMI_CODE_SCRIPT)
     stop = _start_fake_upstream(19246, handler)
 
     try:
@@ -2738,8 +2817,7 @@ except Exception as e:
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_zstd_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_zstd_")
     fake_codex = Path(fake_bin_dir) / "codex"
-    fake_codex.write_text(zstd_codex_script)
-    fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_codex, zstd_codex_script)
     stop = _start_fake_upstream(19243, handler)
 
     try:
@@ -2879,8 +2957,7 @@ except Exception as e:
     trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_double_serial_")
     fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_double_serial_")
     fake_claude = Path(fake_bin_dir) / "claude"
-    fake_claude.write_text(double_serial_script)
-    fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IEXEC)
+    _write_fake_client(fake_claude, double_serial_script)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         upstream_port = sock.getsockname()[1]

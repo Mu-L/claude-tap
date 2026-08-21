@@ -37,6 +37,11 @@ from claude_tap.live import LiveViewerServer, _record_limit_from_request
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_log_handler import SQLiteLogHandler
 from claude_tap.trace_store import get_trace_store
+from tests.conftest import playwright_skip_reason
+
+# The browser tests below launch chromium, which installs separately from the
+# playwright package, so importorskip alone would let them fail instead of skip.
+_pw_skip = playwright_skip_reason()
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -1718,6 +1723,8 @@ async def test_dashboard_quit_route_rejects_non_dashboard_server(trace_db) -> No
 @pytest.mark.asyncio
 async def test_dashboard_session_route_serves_standalone_viewer(trace_db, tmp_path: Path) -> None:
     playwright = pytest.importorskip("playwright.async_api")
+    if _pw_skip is not None:
+        pytest.skip(_pw_skip)
     trace_path = tmp_path / "2026-05-20" / "trace_080000.jsonl"
     _write_jsonl(trace_path, [_anthropic_record(turn=turn) for turn in range(1, 13)])
     _seed_legacy(tmp_path)
@@ -1796,6 +1803,8 @@ async def test_dashboard_session_route_serves_standalone_viewer(trace_db, tmp_pa
 @pytest.mark.asyncio
 async def test_dashboard_session_export_menu_is_not_clipped_on_mobile(trace_db, tmp_path: Path) -> None:
     playwright = pytest.importorskip("playwright.async_api")
+    if _pw_skip is not None:
+        pytest.skip(_pw_skip)
     trace_path = tmp_path / "2026-05-20" / "trace_080000.jsonl"
     _write_jsonl(trace_path, [_anthropic_record()])
     _seed_legacy(tmp_path)
@@ -1853,6 +1862,8 @@ async def test_dashboard_session_export_menu_is_not_clipped_on_mobile(trace_db, 
 @pytest.mark.asyncio
 async def test_dashboard_bulk_delete_edit_mode_focuses_confirmation_dialog(trace_db) -> None:
     playwright = pytest.importorskip("playwright.async_api")
+    if _pw_skip is not None:
+        pytest.skip(_pw_skip)
     store = get_trace_store()
     session_id = store.create_session(client="claude", proxy_mode="reverse")
     store.append_record(session_id, _anthropic_record())
@@ -1893,6 +1904,8 @@ async def test_dashboard_bulk_delete_edit_mode_focuses_confirmation_dialog(trace
 @pytest.mark.asyncio
 async def test_dashboard_edit_mode_allows_selecting_stale_empty_sessions(trace_db) -> None:
     playwright = pytest.importorskip("playwright.async_api")
+    if _pw_skip is not None:
+        pytest.skip(_pw_skip)
     store = get_trace_store()
     stale_empty_id = store.create_session(client="claude", proxy_mode="reverse")
     fresh_empty_id = store.create_session(client="claude", proxy_mode="reverse")

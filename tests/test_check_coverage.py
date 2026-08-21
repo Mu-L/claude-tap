@@ -207,3 +207,18 @@ def test_check_viewer_css_coverage_enforces_changed_selector_matches() -> None:
     assert results[1].percent == 50.0
     assert results[1].passed is False
     assert results[1].detail == "1/2 changed CSS selectors matched; missing: .missing"
+
+
+def test_load_viewer_contract_helpers_resolves_tests_package_imports() -> None:
+    """The contract file is loaded by path, which skips pytest's rootdir insertion.
+
+    Test modules import shared helpers as `from tests.conftest import ...`, so the
+    loader has to put the repo root on sys.path itself or the gate dies on
+    ModuleNotFoundError before it can measure anything.
+    """
+    contract_cases, generate_case_html, compact_records = coverage_module._load_viewer_contract_helpers()
+
+    assert callable(contract_cases)
+    assert callable(generate_case_html)
+    assert callable(compact_records)
+    assert contract_cases()

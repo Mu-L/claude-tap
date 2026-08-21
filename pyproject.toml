@@ -56,6 +56,11 @@ dev = [
     "coverage>=7.6",
     "matplotlib==3.11.1",
     "ruff>=0.11",
+    # Pinned exactly: CI caches ~/.cache/ms-playwright keyed on this file's hash,
+    # and each playwright release expects its own browser revision. A floating
+    # spec would install a version whose revision is absent from the cache,
+    # forcing a fresh browser download on every run.
+    "playwright==1.58.0",
 ]
 
 [tool.ruff]
@@ -106,6 +111,9 @@ viewer_css_selector_min = 65.0
 viewer_css_diff_min = 80.0
 
 [dependency-groups]
+# Kept as a thin alias so `uv run` (which auto-activates this group) and
+# `pip install -e ".[dev]"` install the same set. Declare dev tooling in
+# [project.optional-dependencies] only — pip cannot read PEP 735 groups.
 dev = [
-    "playwright>=1.58.0",
+    "claude-tap[dev]",
 ]
