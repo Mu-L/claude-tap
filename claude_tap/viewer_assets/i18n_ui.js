@@ -50,6 +50,8 @@ function updateStaticTexts() {
       tokenLabel.parentElement.setAttribute('aria-label', t('stats_tokens_hint'));
     }
   }
+  if (e('label-cost')) e('label-cost').textContent = t('stats_cost');
+  if (e('label-saved')) e('label-saved').textContent = t('stats_saved');
   if (e('label-time')) e('label-time').textContent = t('stats_time');
   if (e('drop-title')) e('drop-title').textContent = t('drop_title');
   if (e('drop-desc')) e('drop-desc').textContent = t('drop_desc');

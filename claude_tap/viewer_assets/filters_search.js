@@ -210,6 +210,81 @@ function compareTurns(a, b) {
   return String(a ?? '').localeCompare(String(b ?? ''));
 }
 
+/* ─── Cost display ───
+   Cost is computed in Python (claude_tap/pricing.py) from a vendored LiteLLM
+   price table, then embedded either on each metadata record (lazy mode) or in
+   EMBEDDED_COST_INDEX keyed by entry request id. The viewer only looks values
+   up, formats them and sums them; it holds no price table and does no rate
+   arithmetic. Traces opened by drag-and-drop never pass through Python, so no
+   cost is available for them and the cost stats stay hidden. */
+
+function pricingMeta() {
+  return typeof EMBEDDED_PRICING_META !== 'undefined' && EMBEDDED_PRICING_META ? EMBEDDED_PRICING_META : null;
+}
+
+/* The upstream price file changes several times a day, so the fetch date alone
+   does not identify the table a figure came from. Show the short commit next to
+   it when the snapshot carries one. */
+function pricingStamp(meta) {
+  const parts = [];
+  if (meta?.as_of) parts.push(meta.as_of);
+  if (meta?.upstream_commit) parts.push(String(meta.upstream_commit).slice(0, 12));
+  return parts.length ? ` (${parts.join(' @ ')})` : '';
+}
+
+function entryCostRecord(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.subscription === true) return { subscription: true };
+  if (typeof entry.cost === 'number') {
+    return { cost: entry.cost, uncached_cost: entry.uncached_cost, saved: entry.saved };
+  }
+  /* Live mode and the records API serve raw records with no generated index, so
+     Python attaches the costs to the record; a WebSocket record split into
+     several entries carries one keyed set per derived entry. */
+  const carried = entry._cost_index;
+  if (carried && typeof carried === 'object') {
+    const own = carried[entry.request_id];
+    if (own && (typeof own.cost === 'number' || own.subscription === true)) return own;
+    const keys = Object.keys(carried);
+    if (keys.length === 1 && (typeof carried[keys[0]].cost === 'number' || carried[keys[0]].subscription === true)) {
+      return carried[keys[0]];
+    }
+  }
+  const index = typeof EMBEDDED_COST_INDEX !== 'undefined' ? EMBEDDED_COST_INDEX : null;
+  if (!index) return null;
+  const priced = index[entry.request_id];
+  if (!priced) return null;
+  if (priced.subscription === true) return priced;
+  return typeof priced.cost === 'number' ? priced : null;
+}
+
+/* A subscription or quota turn -- a ChatGPT plan, or a Google Code Assist
+   account quota -- is not a priced turn: those tokens were covered by the plan,
+   so a dollar figure for them was never billed. It is also not an unknown-price
+   turn, so it is reported separately rather than inflating the "no known price"
+   count. */
+function isSubscriptionEntry(entry) {
+  return entryCostRecord(entry)?.subscription === true;
+}
+
+function entryCost(entry) {
+  const record = entryCostRecord(entry);
+  if (!record || record.subscription === true) return null;
+  return record;
+}
+
+function formatCostUsd(amount) {
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '';
+  const abs = Math.abs(amount);
+  const sign = amount < 0 ? '-$' : '$';
+  if (abs === 0) return '$0.00';
+  /* toFixed(4) rounds values below $0.00005 to $0.0000, which reports a paid
+     turn as free. Keep enough digits that a nonzero charge stays visible. */
+  if (abs < 0.0001) return sign + abs.toFixed(6);
+  if (abs < 0.01) return sign + abs.toFixed(4);
+  return sign + abs.toFixed(2);
+}
+
 function applyFilter(preserveDetail) {
   filtered = entries.filter(e => isNavigableTraceEntry(e) && activePaths.has(filterPathKey(getPath(e))));
   if (searchQuery) filtered = filtered.filter(e => matchSearch(e, searchQuery));
@@ -225,9 +300,24 @@ function applyFilter(preserveDetail) {
   let totalTokens = 0, totalDuration = 0;
   let sumInput = 0, sumOutput = 0, sumCacheRead = 0, sumCacheCreate = 0;
   let sumCacheDenominator = 0;
+  let sumCost = 0, sumSaved = 0, pricedTurns = 0, unpricedTurns = 0, subscriptionTurns = 0;
   filtered.forEach(e => {
     totalDuration += e.duration_ms || 0;
     const u = getUsage(e);
+    const costRecord = entryCostRecord(e);
+    const priced = costRecord && costRecord.subscription !== true ? costRecord : null;
+    if (priced) {
+      sumCost += priced.cost;
+      /* Per-entry savings are signed: a 5-minute cache write costs 1.25x
+         uncached input, so a write-only turn is genuinely more expensive than
+         an uncached one. Only the total is clamped for display. */
+      if (typeof priced.saved === 'number') sumSaved += priced.saved;
+      pricedTurns++;
+    } else if (costRecord?.subscription === true) {
+      subscriptionTurns++;
+    } else if (u) {
+      unpricedTurns++;
+    }
     if (u) {
       const inputTokens = u.input_tokens || 0;
       const cacheRead = u.cache_read_input_tokens || 0;
@@ -269,9 +359,42 @@ function applyFilter(preserveDetail) {
   } else {
     ['stat-input-group','stat-output-group','stat-cache-read-group','stat-cache-write-group','stat-cache-hit-rate-group'].forEach(id => $('#'+id).style.display = 'none');
   }
+  renderCostStats(sumCost, sumSaved, pricedTurns, unpricedTurns, subscriptionTurns);
   renderToolFilter();
   renderSidebar(preserveDetail);
   updatePositionIndicator();
+}
+
+function renderCostStats(sumCost, sumSaved, pricedTurns, unpricedTurns, subscriptionTurns = 0) {
+  const costGroup = $('#stat-cost-group');
+  const savedGroup = $('#stat-saved-group');
+  if (!costGroup || !savedGroup) return;
+  if (!pricedTurns) {
+    costGroup.style.display = 'none';
+    savedGroup.style.display = 'none';
+    return;
+  }
+  const meta = pricingMeta();
+  /* Say outright that some turns are missing from the total rather than
+     leaving a partial figure looking complete. The count goes in the visible
+     label, not only a tooltip. Subscription turns are named separately: those
+     tokens were covered by a monthly plan, which is a different reason for
+     absence than a model the table cannot price. */
+  const partial = unpricedTurns > 0 || subscriptionTurns > 0;
+  const sourceNote = meta?.source ? `${meta.source}${pricingStamp(meta)}` : '';
+  const notes = [];
+  if (unpricedTurns > 0) notes.push(formatText('cost_partial', { n: unpricedTurns }));
+  if (subscriptionTurns > 0) notes.push(formatText('cost_subscription', { n: subscriptionTurns }));
+
+  $('#stat-cost').textContent = formatCostUsd(sumCost) + (partial ? '+' : '');
+  costGroup.title = [t('cost_tooltip'), sourceNote, ...notes].filter(Boolean).join(' · ');
+  costGroup.style.display = 'flex';
+
+  /* Total savings are clamped: a net-negative total is an artifact of a window
+     that captured cache writes but not the reads they paid for. */
+  $('#stat-saved').textContent = formatCostUsd(Math.max(0, sumSaved)) + (partial ? '+' : '');
+  savedGroup.title = [t('saved_tooltip'), sourceNote, ...notes].filter(Boolean).join(' · ');
+  savedGroup.style.display = 'flex';
 }
 
 function renderToolFilter() {

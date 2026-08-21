@@ -2560,3 +2560,51 @@ async def test_kimi_code_model_probe_error_marks_probe_only_session_failed(trace
     assert payload is not None
     assert payload["session"]["status"] == "error"
     assert payload["session"]["error"] == "missing bearer token"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_session_records_carry_the_computed_cost(trace_db) -> None:
+    """The records API serves raw records, so cost has to travel on the record.
+
+    Nothing generates an EMBEDDED_COST_INDEX for this path; without the attached
+    figures the live viewer reports no cost for the whole session.
+    """
+    store = get_trace_store()
+    session_id = store.create_session(client="claude", proxy_mode="reverse")
+    store.append_record(
+        session_id,
+        {
+            "timestamp": "2026-08-19T10:00:00+00:00",
+            "request_id": "req_cost",
+            "turn": 1,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {"host": "api.anthropic.com"},
+                "body": {"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "hi"}]},
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "usage": {"input_tokens": 1_000, "cache_read_input_tokens": 40_000, "output_tokens": 20},
+                },
+            },
+        },
+    )
+
+    server = LiveViewerServer(port=0, dashboard_mode=True)
+    port = await server.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/api/sessions/{session_id}/records") as resp:
+                assert resp.status == 200
+                payload = await resp.json()
+    finally:
+        await server.stop()
+
+    priced = payload["records"][0]["_cost_index"]["req_cost"]
+    assert priced["priced_model"] == "claude-sonnet-4-20250514"
+    assert priced["cost"] == pytest.approx(1_000 * 3e-06 + 40_000 * 3e-07 + 20 * 1.5e-05)
+    assert priced["saved"] > 0

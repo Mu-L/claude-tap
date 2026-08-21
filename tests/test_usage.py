@@ -86,6 +86,41 @@ def test_normalize_usage_preserves_explicit_anthropic_cache_read() -> None:
     assert usage["cache_read_input_tokens"] == 4
 
 
+def test_normalize_usage_maps_direct_deepseek_prompt_cache_hit_tokens() -> None:
+    """Direct DeepSeek names its two prompt buckets outright.
+
+    Both are counted inside prompt_tokens, so the bucket is embedded: billing a
+    900-of-1000 hit as fresh input costs an order of magnitude more than the
+    cache-read rate, and the viewer reported no hit at all.
+    """
+    usage = normalize_usage(
+        {
+            "prompt_tokens": 1_000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 900,
+            "prompt_cache_miss_tokens": 100,
+        }
+    )
+
+    assert usage["input_tokens"] == 1_000
+    assert usage["cache_read_input_tokens"] == 900
+    assert usage["cache_read_in_input"] is True
+
+
+def test_a_nested_cached_tokens_detail_still_wins_over_the_deepseek_alias() -> None:
+    """The alias is a fallback, so a details object keeps precedence."""
+    usage = normalize_usage(
+        {
+            "prompt_tokens": 1_000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 700},
+            "prompt_cache_hit_tokens": 900,
+        }
+    )
+
+    assert usage["cache_read_input_tokens"] == 700
+
+
 def test_normalize_usage_drops_null_token_fields_before_alias_mapping() -> None:
     usage = normalize_usage(
         {

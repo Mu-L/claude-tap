@@ -8,7 +8,21 @@ import re
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
-from claude_tap.compact_trace import COMPACT_TRACE_MARKER, build_compact_trace_bundle, is_compact_trace_bundle
+from claude_tap.compact_trace import (
+    COMPACT_TRACE_MARKER,
+    build_compact_trace_bundle,
+    is_compact_trace_bundle,
+    materialize_compact_trace_bundle,
+)
+from claude_tap.pricing import (
+    _int,
+    _search_cost_per_query,
+    entry_cost,
+    is_priced_model,
+    model_from_path,
+    pricing_metadata,
+    provider_namespace,
+)
 from claude_tap.sse import SSEReassembler
 from claude_tap.usage import normalize_usage
 
@@ -411,10 +425,280 @@ def _is_gemini_request_body(body: dict) -> bool:
 
 
 def _model_from_path(path: object) -> str:
+    """Extract a model id from a request path.
+
+    Delegates to the pricing adapter so both sides read one parser: a Bedrock id
+    keeps its ``-v1:0`` version suffix (and is percent-decoded) while a Vertex
+    path still drops the method after the colon.
+    """
     if not isinstance(path, str):
         return ""
-    match = re.search(r"/models?/([^:?/]+)", path)
-    return match.group(1) if match else ""
+    return model_from_path(path)
+
+
+def _first_priced_model(*candidates: object, provider: str = "", billed: object = None) -> str:
+    """Return the first candidate the price table knows, else the first non-empty.
+
+    A gateway names its own deployment alias in the request body while the
+    response reports the model actually billed. Taking the first non-empty string
+    leaves such a turn unpriced even though the table can price the response
+    model, so the table gets consulted before the order is settled. The first
+    non-empty name is still what gets displayed when none of them is priceable,
+    since that is what the request asked for.
+
+    `billed` names the model the response says was charged. It wins whenever the
+    table can price it, because a deployment alias may also be a table key at a
+    different rate: an Azure deployment called `gpt-4o` answering as
+    `gpt-4o-2024-11-20` would otherwise bill at the undated entry's 2.5/10 rather
+    than the dated 2.75/11, understating the turn by 10%.
+    """
+    billed_name = billed if isinstance(billed, str) and billed else ""
+    if billed_name and is_priced_model(billed_name, provider=provider):
+        return billed_name
+    names = [value for value in candidates if isinstance(value, str) and value]
+    for name in names:
+        if is_priced_model(name, provider=provider):
+            return name
+    if billed_name:
+        names.append(billed_name)
+    return names[0] if names else ""
+
+
+def _cache_ttl_1h(body: dict) -> bool:
+    """Return True when the request asks for Anthropic's 1-hour cache TTL.
+
+    A 1-hour cache write is billed above the default 5-minute rate, so the
+    request's own cache_control breakpoints decide which write rate applies.
+    """
+
+    def _scan(value: object, depth: int = 0) -> bool:
+        if depth > 6:
+            return False
+        if isinstance(value, dict):
+            control = value.get("cache_control")
+            if isinstance(control, dict) and control.get("ttl") == "1h":
+                return True
+            return any(_scan(item, depth + 1) for item in value.values())
+        if isinstance(value, list):
+            return any(_scan(item, depth + 1) for item in value)
+        return False
+
+    return _scan(body)
+
+
+# Upstreams whose traffic is covered by a plan or an account quota rather than
+# billed per token, so a dollar figure derived from the provider's published API
+# rates was never charged to the user (see README's per-client auth tables).
+#
+#   - chatgpt.com/backend-api/codex: Codex CLI's ChatGPT Plus/Pro/Team OAuth.
+#   - cloudcode-pa.googleapis.com: the Google Code Assist API behind Gemini CLI's
+#     default OAuth flow and Antigravity CLI. Its staging and daily hosts carry
+#     the same suffix. API-key Gemini traffic goes to
+#     generativelanguage.googleapis.com instead and *is* billed per token, so the
+#     Code Assist host is what separates quota from billed usage -- classifying
+#     Gemini by model name would wrongly zero out real API charges.
+_SUBSCRIPTION_UPSTREAMS = ("chatgpt.com/backend-api/codex", "cloudcode-pa.googleapis.com")
+
+# Code Assist's own route. A reverse-mode capture names the local listener as the
+# host, so the route is the only remaining signal that the request was answered
+# from an account quota.
+_SUBSCRIPTION_ROUTES = ("/v1internal:", "/v1internal/")
+
+
+def _is_subscription_traffic(record: object) -> bool:
+    """Return True when the record's upstream bills by subscription, not by token.
+
+    Checked against the recorded upstream and the request Host together: reverse
+    mode records the target it forwarded to, while forward-proxy mode identifies
+    the destination only by the CONNECT host.
+    """
+    if not isinstance(record, dict):
+        return False
+    req = _dict_or_empty(record.get("request"))
+    headers = req.get("headers")
+    host = ""
+    if isinstance(headers, dict):
+        for key in ("Host", "host", ":authority"):
+            value = headers.get(key)
+            if isinstance(value, str) and value:
+                host = value
+                break
+    signal = " ".join(
+        part
+        for part in (
+            str(record.get("upstream_base_url") or ""),
+            host,
+            str(req.get("path") or ""),
+        )
+        if part
+    ).lower()
+    if not signal:
+        return False
+    if any(upstream in signal for upstream in _SUBSCRIPTION_UPSTREAMS):
+        return True
+    if any(route in signal for route in _SUBSCRIPTION_ROUTES):
+        return True
+    # A forward-proxy capture names only the host, so the Codex route on that
+    # host is what identifies the subscription upstream.
+    return "chatgpt.com" in signal and "/backend-api/codex" in signal
+
+
+def _completed_web_search_calls_in_output(output: object) -> int:
+    if not isinstance(output, list):
+        return 0
+    return sum(
+        1
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "web_search_call"
+        and item.get("status") in (None, "completed")
+    )
+
+
+def _completed_web_search_calls_in_events(events: object) -> int:
+    if not isinstance(events, list):
+        return 0
+    count = 0
+    for event in events:
+        if _event_type(event) != "response.output_item.done":
+            continue
+        payload = _event_payload(event)
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "web_search_call"
+            and item.get("status") in (None, "completed")
+        ):
+            count += 1
+    return count
+
+
+def _completed_web_search_calls(*, output: object = None, events: object = None) -> int:
+    """Count completed web_search_call items once.
+
+    The same call is typically present in both the final ``output`` array and
+    the ``response.output_item.done`` stream. Adding those counts would apply
+    the per-query surcharge twice.
+    """
+    return max(
+        _completed_web_search_calls_in_output(output),
+        _completed_web_search_calls_in_events(events),
+    )
+
+
+def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None, search_calls: int = 0) -> dict:
+    """Return per-entry cost fields, or an empty dict when no cost applies.
+
+    Cost lives here rather than in the viewer so a single price table and a
+    single set of tier rules serve every output path.
+
+    Subscription traffic is deliberately left unpriced. The price table can put a
+    number on those tokens, but it is a counterfactual "what the API would have
+    charged", not money the user was billed, and presenting it beside real
+    per-token costs in one total would misstate what the session cost. The
+    ``subscription`` flag travels instead so the viewer can say why the turn
+    carries no figure rather than implying the model has no known price.
+    """
+    if _is_subscription_traffic(record):
+        return {"subscription": True}
+    priced = entry_cost(
+        model,
+        usage,
+        cache_ttl_1h=_cache_ttl_1h(body),
+        provider=provider_namespace(record),
+        search_calls=search_calls,
+    )
+    if priced is None:
+        return {}
+    return {
+        "cost": priced.cost,
+        "uncached_cost": priced.uncached_cost,
+        "saved": priced.saved,
+        "priced_model": priced.model,
+        "long_context": priced.long_context,
+    }
+
+
+def _sum_usage(usages: list[dict]) -> dict:
+    """Return the summed token buckets for several responses in one record.
+
+    Only the buckets the sidebar reports are summed. ``cache_read_in_input`` is a
+    shape flag rather than a count, so it is carried from the first response that
+    states it — every response in one record comes from the same provider.
+
+    Counts go through :func:`claude_tap.pricing._int` so a non-finite or
+    oversize value in one response cannot abort viewer generation.
+    """
+    totals: dict[str, object] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "total_tokens",
+    ):
+        summed = sum(_int(usage.get(key)) for usage in usages)
+        if summed:
+            totals[key] = summed
+    for usage in usages:
+        if "cache_read_in_input" in usage:
+            totals["cache_read_in_input"] = usage["cache_read_in_input"]
+            break
+    return totals
+
+
+def _aggregate_cost_fields(
+    models: list[str],
+    usages: list[dict],
+    body: dict,
+    *,
+    record: object = None,
+    search_calls: int = 0,
+) -> dict:
+    """Return cost fields covering every response in a multi-response record.
+
+    Each response is priced on its own — the long-context tier is selected by one
+    prompt's size, so pricing the summed tokens would push short responses into a
+    tier they never hit — and the resulting figures are then added.
+
+    Returns an empty dict when any response is unpriceable, matching
+    :func:`claude_tap.pricing.entry_cost`: a total that silently omits some of the
+    responses in a record would still be displayed as if it covered all of them.
+    """
+    if not usages:
+        return {}
+    if _is_subscription_traffic(record):
+        return {"subscription": True}
+    ttl_1h = _cache_ttl_1h(body)
+    provider = provider_namespace(record)
+    total = 0.0
+    total_uncached = 0.0
+    total_saved = 0.0
+    long_context = False
+    priced_model = ""
+    for model, usage in zip(models, usages):
+        priced = entry_cost(model, usage, cache_ttl_1h=ttl_1h, provider=provider)
+        if priced is None:
+            return {}
+        total += priced.cost
+        total_uncached += priced.uncached_cost
+        total_saved += priced.saved
+        long_context = long_context or priced.long_context
+        priced_model = priced_model or priced.model
+    if search_calls:
+        search_rate = _search_cost_per_query(priced_model or models[0], provider)
+        if search_rate is None:
+            return {}
+        search_total = search_calls * search_rate
+        total += search_total
+        total_uncached += search_total
+    return {
+        "cost": total,
+        "uncached_cost": total_uncached,
+        "saved": total_saved,
+        "priced_model": priced_model,
+        "long_context": long_context,
+    }
 
 
 def _gemini_text_from_parts(parts: object) -> str:
@@ -857,6 +1141,117 @@ def _session_text_from_content(content: object) -> str:
     return ""
 
 
+def _websocket_response_groups(events: list[dict]) -> list[list[dict]]:
+    """Group WebSocket stream events into one list per completed response.
+
+    The viewer splits a single WebSocket record into one entry per
+    ``response.created``…``response.completed`` pair, so pricing has to group
+    the same way or the per-entry costs will not line up with the entries the
+    viewer renders.
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] | None = None
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == "response.created":
+            if current:
+                groups.append(current)
+            current = [event]
+            continue
+        if current is None:
+            continue
+        current.append(event)
+        if event_type == "response.completed":
+            groups.append(current)
+            current = None
+    if current:
+        groups.append(current)
+    return [group for group in groups if any(_event_type(event) == "response.completed" for event in group)]
+
+
+def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
+    """Return (entry key, cost fields) pairs for one raw record.
+
+    A WebSocket record carrying several responses yields one pair per response,
+    keyed the way the viewer keys the entries it derives from that record.
+    """
+    if not isinstance(r, dict):
+        return []
+    req = _dict_or_empty(r.get("request"))
+    body = _dict_or_empty(req.get("body"))
+    resp = _dict_or_empty(r.get("response"))
+    request_id = r.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return []
+
+    ws_events = resp.get("ws_events")
+    groups = _websocket_response_groups(ws_events) if isinstance(ws_events, list) else []
+    if len(groups) > 1:
+        provider = provider_namespace(r)
+        pairs: list[tuple[str, dict]] = []
+        for idx, group in enumerate(groups):
+            payload = _last_response_payload_for_event(group, "response.completed")
+            usage = normalize_usage(payload.get("usage") or {})
+            model = _first_priced_model(
+                body.get("model", ""),
+                _model_from_path(req.get("path", "")),
+                provider=provider,
+                billed=payload.get("model"),
+            )
+            fields = _cost_fields(
+                model,
+                usage,
+                body,
+                record=r,
+                search_calls=_completed_web_search_calls(output=payload.get("output"), events=group),
+            )
+            if fields:
+                pairs.append((f"{request_id}:{idx + 1}", fields))
+        return pairs
+
+    meta = _extract_metadata_from_record(r)
+    if not isinstance(meta, dict):
+        return []
+    if meta.get("subscription") is True:
+        return [(request_id, {"subscription": True})]
+    if "cost" not in meta:
+        return []
+    return [
+        (
+            request_id,
+            {key: meta[key] for key in ("cost", "uncached_cost", "saved", "priced_model", "long_context")},
+        )
+    ]
+
+
+def _build_cost_index(records: list[dict]) -> dict[str, dict]:
+    """Return per-entry cost fields keyed by the viewer's entry request id."""
+    index: dict[str, dict] = {}
+    for record in records:
+        for key, fields in _cost_index_entries(record):
+            index[key] = fields
+    return index
+
+
+def attach_cost_to_record(record: dict) -> dict:
+    """Return ``record`` with a ``_cost_index`` of the costs Python computed.
+
+    Live mode and the records API hand raw records to the viewer with no
+    generated cost index, so the cost has to travel on the record itself or
+    those paths show no cost at all. Keys match what the viewer derives from the
+    record, including the ``<request_id>:<n>`` form for a WebSocket record it
+    splits into several entries.
+    """
+    if not isinstance(record, dict):
+        return record
+    pairs = _cost_index_entries(record)
+    if not pairs:
+        return record
+    enriched = dict(record)
+    enriched["_cost_index"] = {key: fields for key, fields in pairs}
+    return enriched
+
+
 def _is_tool_result_only_message(message: dict) -> bool:
     content = message.get("content")
     if not isinstance(content, list) or not content:
@@ -921,7 +1316,23 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         len(response_output) if isinstance(response_output, list) else _response_output_count_from_events(stream_events)
     )
 
-    # Token usage — from response.body.usage or terminal stream event
+    # Token usage — from response.body.usage or terminal stream event.
+    # A WebSocket record can carry several completed responses. There is one
+    # metadata stub per record, and lazy and dashboard viewers read cost from that
+    # stub alone (their embedded index is empty), so reading only the last
+    # response would drop every earlier one from the displayed total.
+    response_groups = _websocket_response_groups(stream_events) if stream_events else []
+    group_usages: list[dict] = []
+    group_models: list[str] = []
+    provider = provider_namespace(r)
+    if len(response_groups) > 1:
+        for group in response_groups:
+            payload = _last_response_payload_for_event(group, "response.completed")
+            group_usages.append(normalize_usage(payload.get("usage") or {}))
+            group_models.append(
+                _first_priced_model(body.get("model", ""), provider=provider, billed=payload.get("model"))
+            )
+
     usage = resp_body.get("usage") or _extract_gemini_response_usage(raw_resp_body) or {}
     if not usage:
         for ev in reversed(stream_events):
@@ -933,6 +1344,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
                 if usage:
                     break
     usage = normalize_usage(usage)
+    if group_usages:
+        usage = _sum_usage(group_usages)
 
     # System prompt hint (first 200 chars)
     sys_text = ""
@@ -995,6 +1408,25 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     if isinstance(err_obj, dict):
         error_msg = err_obj.get("message", "")
 
+    # A WebSocket or Responses-API record often names the model only in the
+    # streamed response payload, so a request body without one is not the end of
+    # the search — otherwise the turn stays unpriced.
+    model = _first_priced_model(
+        body.get("model", ""),
+        _model_from_path(req.get("path", "")),
+        completed_response.get("model", ""),
+        created_response.get("model", ""),
+        provider=provider,
+        billed=resp_body.get("model", "") or completed_response.get("model", "") or created_response.get("model", ""),
+    )
+
+    search_calls = _completed_web_search_calls(output=resp_body.get("output"), events=stream_events)
+    cost_fields = (
+        _aggregate_cost_fields(group_models, group_usages, body, record=r, search_calls=search_calls)
+        if group_usages
+        else _cost_fields(model, usage, body, record=r, search_calls=search_calls)
+    )
+
     return {
         "turn": r.get("turn"),
         "request_id": r.get("request_id", ""),
@@ -1003,7 +1435,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "transport": r.get("transport", ""),
         "method": req.get("method", ""),
         "path": req.get("path", ""),
-        "model": body.get("model", "") or _model_from_path(req.get("path", "")),
+        "model": model,
         "request_generate": _first_bool(
             body.get("generate"),
             *(event_body.get("generate") for event_body in request_event_bodies if isinstance(event_body, dict)),
@@ -1021,6 +1453,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "output_tokens": usage.get("output_tokens", 0),
         "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "cache_read_in_input": bool(usage.get("cache_read_in_input")),
+        **cost_fields,
         "has_system": bool(sys_text),
         "message_count": len(msgs),
         "session_user_text": _latest_user_text(msgs) or _first_user_text(msgs),
@@ -1031,6 +1465,16 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "tool_names": tool_names,
         "response_tool_names": response_tool_names,
     }
+
+
+def _pricing_data_js(cost_index: dict[str, dict]) -> str:
+    """Return the JS consts carrying precomputed cost and price provenance.
+
+    The viewer formats and sums these; it never holds a price table of its own.
+    """
+    index_js = json.dumps(cost_index, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    meta_js = json.dumps(pricing_metadata(), ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    return f"const EMBEDDED_COST_INDEX = {index_js};\nconst EMBEDDED_PRICING_META = {meta_js};\n"
 
 
 def _generate_html_viewer(
@@ -1095,11 +1539,16 @@ def _generate_html_viewer_from_compact_bundle(
     jsonl_path_js = json.dumps(trace_path_label)
     html_path_js = json.dumps(html_path_label)
     version_js = json.dumps(CLAUDE_TAP_VERSION)
+    try:
+        cost_index = _build_cost_index(materialize_compact_trace_bundle(compact_bundle))
+    except ValueError:
+        cost_index = {}
     data_js = (
         f"const EMBEDDED_TRACE_COMPACT_DATA = {compact_js};\n"
         f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
         f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
         f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+        f"{_pricing_data_js(cost_index)}"
     )
 
     html = _read_viewer_template()
@@ -1137,6 +1586,8 @@ def _generate_html_viewer_from_metadata(
         f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
         f"const __TRACE_RECORDS_API__ = {records_api_js};\n"
         f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+        # Cost already rides on each metadata record, so only provenance is added.
+        f"{_pricing_data_js({})}"
     )
 
     html = _read_viewer_template()
@@ -1192,6 +1643,8 @@ def _generate_html_viewer_from_records(
             f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
             f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
             f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+            # Cost already rides on each metadata record, so only provenance is added.
+            f"{_pricing_data_js({})}"
         )
 
         html = _read_viewer_template()
@@ -1205,11 +1658,20 @@ def _generate_html_viewer_from_records(
         )
     else:
         # Small trace: inline all data as before
+        parsed_records: list[dict] = []
+        for rec in record_json_lines:
+            try:
+                parsed = json.loads(rec)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_records.append(parsed)
         data_js = (
             "const EMBEDDED_TRACE_DATA = [\n" + ",\n".join(records) + "\n];\n"
             f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
             f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
             f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+            f"{_pricing_data_js(_build_cost_index(parsed_records))}"
         )
 
         html = _read_viewer_template()

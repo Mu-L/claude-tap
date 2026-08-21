@@ -35,7 +35,9 @@ from claude_tap.viewer import (
     _generate_html_viewer_from_compact_bundle,
     _generate_html_viewer_from_metadata,
     _normalize_record_for_viewer,
+    _pricing_data_js,
     _read_viewer_template,
+    attach_cost_to_record,
 )
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -302,7 +304,7 @@ class LiveViewerServer:
                 self._current_date = today
             self._records.append(record)
 
-        data = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        data = json.dumps(attach_cost_to_record(record), ensure_ascii=False, separators=(",", ":"))
         message = f"data: {data}\n\n"
 
         disconnected = []
@@ -397,9 +399,12 @@ class LiveViewerServer:
             return web.Response(status=404, text="viewer.html not found")
 
         html = _read_viewer_template()
+        # Price provenance has to be present even though the index starts empty:
+        # live records arrive over SSE carrying their own costs.
         live_js = (
             "const LIVE_MODE = true;\nconst EMBEDDED_TRACE_DATA = [];\n"
             f"const __TRACE_SESSION_ID__ = {json.dumps(self.session_id or '')};\n"
+            f"{_pricing_data_js({})}"
         )
         html = html.replace(
             VIEWER_SCRIPT_ANCHOR,
@@ -423,7 +428,7 @@ class LiveViewerServer:
 
         async with self._lock:
             for record in self._records:
-                data = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                data = json.dumps(attach_cost_to_record(record), ensure_ascii=False, separators=(",", ":"))
                 await resp.write(f"data: {data}\n\n".encode("utf-8"))
 
         self._sse_clients.append(resp)
@@ -486,7 +491,7 @@ class LiveViewerServer:
     async def _handle_records(self, request: web.Request) -> web.Response:
         """Return all records as JSON array."""
         async with self._lock:
-            return web.json_response(self._records)
+            return web.json_response([attach_cost_to_record(record) for record in self._records])
 
     async def _handle_dates(self, request: web.Request) -> web.Response:
         """Return available trace dates (descending)."""
@@ -501,7 +506,7 @@ class LiveViewerServer:
             return web.Response(status=400, text="Invalid date format")
 
         records = ensure_trace_store().load_records_for_date(date_key)
-        return web.json_response(records)
+        return web.json_response([attach_cost_to_record(record) for record in records])
 
     async def _handle_agents(self, request: web.Request) -> web.Response:
         """Return trace history agent buckets."""
@@ -556,6 +561,8 @@ class LiveViewerServer:
         )
         if session is None:
             return web.json_response({"error": "Session not found"}, status=404)
+        session = dict(session)
+        session["records"] = [attach_cost_to_record(record) for record in session.get("records") or []]
         return web.json_response(session)
 
     async def _handle_session_html_compat(self, request: web.Request) -> web.Response:

@@ -27,14 +27,23 @@ function buildStubEntry(meta, rawIdx) {
   const usage = {};
   if (meta.input_tokens) usage.input_tokens = meta.input_tokens;
   if (meta.output_tokens) usage.output_tokens = meta.output_tokens;
-  const hasCacheCreate = meta.cache_creation_input_tokens !== undefined && meta.cache_creation_input_tokens !== null;
   if (meta.cache_read_input_tokens) {
     usage.cache_read_input_tokens = meta.cache_read_input_tokens;
-    /* Infer cache embedding style from model name so the cache hit rate
-       denominator is correct in lazy/dashboard mode.  Claude/Anthropic and
-       Bedrock keep cache_read as a separate bucket; OpenAI/Gemini embed it. */
-    const m = (meta.model || '').toLowerCase();
-    usage._cache_read_in_input = !(hasCacheCreate || m.includes('claude') || m.includes('anthropic') || m.includes('bedrock'));
+    /* Python already decided this when it normalized the captured usage, so take
+       its answer instead of guessing from the model name. The old inference read
+       cache_creation_input_tokens as proof of a separate bucket, but metadata
+       carries that key even at zero, so every embedded-cache turn was misread:
+       a 51K-input/50K-cached OpenAI turn showed a ~50% hit rate against a
+       101K denominator instead of 98% against 51K.
+
+       Fall back to the name check only for metadata written before the flag
+       existed, so an older trace keeps the behaviour it was generated with. */
+    if (typeof meta.cache_read_in_input === 'boolean') {
+      usage._cache_read_in_input = meta.cache_read_in_input;
+    } else {
+      const m = (meta.model || '').toLowerCase();
+      usage._cache_read_in_input = !(m.includes('claude') || m.includes('anthropic') || m.includes('bedrock'));
+    }
   }
   if (meta.cache_creation_input_tokens) usage.cache_creation_input_tokens = meta.cache_creation_input_tokens;
 
@@ -68,14 +77,18 @@ function buildStubEntry(meta, rawIdx) {
   }
 
   const responseBody = {
-    usage: usage,
+    /* Only attach usage when a bucket actually carried tokens. An empty object is
+       truthy, so installing it unconditionally made every usage-free turn --
+       /v1/messages/count_tokens above all -- read as a turn whose price is
+       unknown, inflating the "no known price" count in lazy mode only. */
+    usage: Object.keys(usage).length ? usage : undefined,
     content: respContent.length ? respContent : undefined,
     error: meta.error_message ? { message: meta.error_message } : undefined,
   };
   if (typeof meta.response_generate === 'boolean') responseBody.generate = meta.response_generate;
   if (meta.response_output_count) responseBody.output = Array.from({ length: meta.response_output_count }, () => ({}));
 
-  return {
+  const stub = {
     _isStub: true,
     _rawIdx: rawIdx,
     _entry_index: rawIdx,
@@ -96,6 +109,18 @@ function buildStubEntry(meta, rawIdx) {
       body: responseBody,
     },
   };
+  /* In lazy mode the cost Python computed rides on each metadata record and
+     EMBEDDED_COST_INDEX is empty, so a stub that drops these fields makes the
+     cost stats read zero for the whole trace. */
+  /* Subscription turns carry no cost on purpose, and the flag has to survive
+     into the stub or they get counted as "price unknown" instead. */
+  if (meta.subscription === true) stub.subscription = true;
+  if (typeof meta.cost === 'number') stub.cost = meta.cost;
+  if (typeof meta.uncached_cost === 'number') stub.uncached_cost = meta.uncached_cost;
+  if (typeof meta.saved === 'number') stub.saved = meta.saved;
+  if (meta.priced_model) stub.priced_model = meta.priced_model;
+  if (typeof meta.long_context === 'boolean') stub.long_context = meta.long_context;
+  return stub;
 }
 
 function toolDisplayName(td) {

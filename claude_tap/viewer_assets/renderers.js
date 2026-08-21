@@ -464,6 +464,10 @@ function shouldRenderRequestContext(entry, body, msgs, respOutput) {
   return true;
 }
 
+function tokenCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 function normalizeUsage(usage) {
   if (!usage || typeof usage !== 'object') return null;
   const normalized = { ...usage };
@@ -479,8 +483,11 @@ function normalizeUsage(usage) {
   if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.completion_tokens) {
     normalized.output_tokens = usage.completion_tokens;
   }
-  if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.candidatesTokenCount) {
-    normalized.output_tokens = usage.candidatesTokenCount;
+  if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && (usage.candidatesTokenCount || usage.thoughtsTokenCount)) {
+    /* Gemini keeps reasoning tokens out of candidatesTokenCount but bills them
+       at the output rate, so the displayed total has to include both. Mirrors
+       claude_tap/usage.py. */
+    normalized.output_tokens = tokenCount(usage.candidatesTokenCount) + tokenCount(usage.thoughtsTokenCount);
   }
   if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.outputTokens) {
     normalized.output_tokens = usage.outputTokens;
@@ -494,12 +501,18 @@ function normalizeUsage(usage) {
        rate denominator can avoid double-counting. */
     let embeddedCached = usage.cached_tokens;
     if (embeddedCached === undefined) embeddedCached = usage.cachedContentTokenCount;
-    if (embeddedCached === undefined && usage.input_tokens_details && typeof usage.input_tokens_details === 'object') {
-      embeddedCached = usage.input_tokens_details.cached_tokens;
+    /* `input_token_details` is singular on OpenAI Realtime responses, and
+       pricing.py already lists it among the Realtime modality buckets. Left out,
+       a Realtime cache hit yielded no cache_read_input_tokens at all, so the whole
+       prompt was billed at the full input rate and no cache read was shown. */
+    for (const key of ['input_tokens_details', 'input_token_details', 'prompt_tokens_details']) {
+      if (embeddedCached !== undefined) break;
+      if (usage[key] && typeof usage[key] === 'object') embeddedCached = usage[key].cached_tokens;
     }
-    if (embeddedCached === undefined && usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object') {
-      embeddedCached = usage.prompt_tokens_details.cached_tokens;
-    }
+    /* Direct DeepSeek names its two prompt buckets outright instead of nesting
+       them under a details object.  Both are counted inside prompt_tokens, so
+       this is an embedded bucket like the ones above. */
+    if (embeddedCached === undefined) embeddedCached = usage.prompt_cache_hit_tokens;
     if (embeddedCached !== undefined && embeddedCached !== null) {
       normalized.cache_read_input_tokens = embeddedCached;
       normalized._cache_read_in_input = true;
