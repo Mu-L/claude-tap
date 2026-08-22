@@ -696,6 +696,13 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                   visualNavigate(-1);
                   vsRenderVisible();
                   if (entries.length > 1) compareSidebarModelOrder(entries[0], entries[1]);
+                  // Cache diagnosis reads the unfiltered history to find the turn
+                  // whose cache a cold write was meant to reuse, so it has to run
+                  // while the full corpus is loaded -- the live-mode block below
+                  // narrows `entries` to a single websocket record.
+                  for (const entry of entries) {
+                    renderCacheDiagnostic(entry);
+                  }
                 }"""
             )
             page.evaluate(

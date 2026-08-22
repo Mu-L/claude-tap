@@ -149,6 +149,7 @@ function renderDetail(e) {
     const jsonSection = section(t('section_json'), `<div class="json-view">${renderJSONTree(e)}</div>`, false, JSON.stringify(e, null, 2));
     html += actionBarHtml;
     if (usage) html += renderTokenUsage(usage);
+    html += renderCacheDiagnostic(e);
     html += toolsSection + systemSection + messagesSection + responseSection;
     if (streamEvents.length) html += streamSection;
     html += jsonSection;
@@ -159,6 +160,8 @@ function renderDetail(e) {
   d.innerHTML = html;
   bindSections(d);
   restoreSectionStates();
+  // Dashboard mode renders the cache card before its predecessor is available.
+  if (typeof upgradeCacheDiagnostic === 'function') upgradeCacheDiagnostic(e, d);
   if (globalSearchState.open && globalSearchState.query) {
     const target = getTargetForGlobalMatch(globalSearchState.currentMatch);
     const localIndex = target && target.entryKey === entryStableKey(e) ? target.localIndex : 0;
@@ -203,6 +206,7 @@ function renderTraceDetail(entry, ctx) {
 
   let html = renderTraceFormatControls();
   if (ctx.usage) html += renderTokenUsage(ctx.usage);
+  html += renderCacheDiagnostic(entry);
   html += '<div class="trace-grid">';
   html += renderTraceBlock(
     t('tok_input'),

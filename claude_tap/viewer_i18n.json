@@ -95,7 +95,15 @@
     "diff_sys_new": "Current",
     "diff_fallback_warning": "No exact thread match found — showing closest same-model request",
     "diff_select_target": "Compare against:",
-    "diff_select_auto": "Auto"
+    "diff_select_auto": "Auto",
+    "cache_diag_title": "Cache Diagnostic:",
+    "cache_miss_system": "System prompt modified since the previous turn",
+    "cache_miss_tools": "Tool schemas modified since the previous turn",
+    "cache_miss_history": "Message history prefix modified or truncated",
+    "cache_miss_ttl": "Cache expired (idle longer than {minutes} min)",
+    "cache_miss_initial": "Initial prompt cache creation",
+    "cache_miss_unknown": "Cache rebuilt from scratch, cause not identifiable from the captured turns",
+    "cache_miss_pending": "Analyzing the previous turn to determine the cause…"
   },
   "zh-CN": {
     "title": "claude-tap",
@@ -193,7 +201,15 @@
     "diff_sys_new": "本次",
     "diff_fallback_warning": "未找到精确线程匹配 — 显示最近的同模型请求",
     "diff_select_target": "对比对象：",
-    "diff_select_auto": "自动"
+    "diff_select_auto": "自动",
+    "cache_diag_title": "缓存诊断：",
+    "cache_miss_system": "System Prompt 相比上一轮发生变动",
+    "cache_miss_tools": "工具定义相比上一轮发生变更",
+    "cache_miss_history": "历史消息前缀发生变动或截断",
+    "cache_miss_ttl": "缓存过期（闲置超过 {minutes} 分钟）",
+    "cache_miss_initial": "初始 Prompt 缓存创建",
+    "cache_miss_unknown": "缓存被完全重建，但从已捕获的轮次无法判定原因",
+    "cache_miss_pending": "正在分析上一轮请求以判定原因…"
   },
   "ja": {
     "title": "claude-tap",
@@ -291,7 +307,15 @@
     "diff_sys_new": "今回",
     "diff_fallback_warning": "正確なスレッド一致が見つかりません — 同モデルの直近のリクエストを表示",
     "diff_select_target": "比較対象：",
-    "diff_select_auto": "自動"
+    "diff_select_auto": "自動",
+    "cache_diag_title": "キャッシュ診断:",
+    "cache_miss_system": "前のターンからシステムプロンプトが変更されました",
+    "cache_miss_tools": "前のターンからツール定義が変更されました",
+    "cache_miss_history": "メッセージ履歴のプレフィックスが変更または切り詰められました",
+    "cache_miss_ttl": "キャッシュ期限切れ（{minutes} 分以上アイドル）",
+    "cache_miss_initial": "初期プロンプトキャッシュ作成",
+    "cache_miss_unknown": "キャッシュが再構築されましたが、記録されたターンから原因を特定できません",
+    "cache_miss_pending": "原因を特定するため前のターンを解析しています…"
   },
   "ko": {
     "title": "claude-tap",
@@ -389,7 +413,15 @@
     "diff_sys_new": "현재",
     "diff_fallback_warning": "정확한 스레드 일치를 찾을 수 없습니다 — 가장 가까운 동일 모델 요청을 표시",
     "diff_select_target": "비교 대상：",
-    "diff_select_auto": "자동"
+    "diff_select_auto": "자동",
+    "cache_diag_title": "캐시 진단:",
+    "cache_miss_system": "이전 턴 이후 시스템 프롬프트가 변경되었습니다",
+    "cache_miss_tools": "이전 턴 이후 도구 정의가 변경되었습니다",
+    "cache_miss_history": "메시지 기록 접두사가 수정되거나 잘렸습니다",
+    "cache_miss_ttl": "캐시 만료됨 ({minutes}분 이상 유휴)",
+    "cache_miss_initial": "초기 프롬프트 캐시 생성",
+    "cache_miss_unknown": "캐시가 재생성되었으나 기록된 턴에서 원인을 확인할 수 없습니다",
+    "cache_miss_pending": "원인을 파악하기 위해 이전 턴을 분석하고 있습니다…"
   },
   "fr": {
     "title": "claude-tap",
@@ -487,7 +519,15 @@
     "diff_sys_new": "Actuel",
     "diff_fallback_warning": "Aucune correspondance de fil exacte trouvée — affichage de la requête du même modèle la plus proche",
     "diff_select_target": "Comparer avec :",
-    "diff_select_auto": "Auto"
+    "diff_select_auto": "Auto",
+    "cache_diag_title": "Diagnostic du cache :",
+    "cache_miss_system": "Prompt système modifié depuis le tour précédent",
+    "cache_miss_tools": "Schémas d'outils modifiés depuis le tour précédent",
+    "cache_miss_history": "Préfixe de l'historique modifié ou tronqué",
+    "cache_miss_ttl": "Cache expiré (inactif plus de {minutes} min)",
+    "cache_miss_initial": "Création initiale du cache de prompt",
+    "cache_miss_unknown": "Cache reconstruit, cause non identifiable à partir des tours capturés",
+    "cache_miss_pending": "Analyse du tour précédent pour déterminer la cause…"
   },
   "ar": {
     "title": "claude-tap",
@@ -585,7 +625,15 @@
     "diff_sys_new": "الحالي",
     "diff_fallback_warning": "لم يتم العثور على تطابق دقيق للخيط — عرض أقرب طلب لنفس النموذج",
     "diff_select_target": "مقارنة مع:",
-    "diff_select_auto": "تلقائي"
+    "diff_select_auto": "تلقائي",
+    "cache_diag_title": "تشخيص الذاكرة المؤقتة:",
+    "cache_miss_system": "تم تعديل مطالبة النظام منذ الجولة السابقة",
+    "cache_miss_tools": "تم تعديل مخططات الأدوات منذ الجولة السابقة",
+    "cache_miss_history": "تم تعديل أو اقتطاع بادئة سجل الرسائل",
+    "cache_miss_ttl": "انتهت صلاحية الذاكرة المؤقتة (خمول أكثر من {minutes} دقيقة)",
+    "cache_miss_initial": "إنشاء ذاكرة التخزين المؤقت للمطالبة الأولية",
+    "cache_miss_unknown": "تمت إعادة بناء الذاكرة المؤقتة، ولا يمكن تحديد السبب من الجولات المسجلة",
+    "cache_miss_pending": "يجري تحليل الجولة السابقة لتحديد السبب…"
   },
   "de": {
     "title": "claude-tap",
@@ -683,7 +731,15 @@
     "diff_sys_new": "Aktuelle",
     "diff_fallback_warning": "Keine exakte Thread-Übereinstimmung gefunden — zeige nächste Anfrage desselben Modells",
     "diff_select_target": "Vergleichen mit:",
-    "diff_select_auto": "Auto"
+    "diff_select_auto": "Auto",
+    "cache_diag_title": "Cache-Diagnose:",
+    "cache_miss_system": "System-Prompt seit der vorherigen Runde geändert",
+    "cache_miss_tools": "Tool-Schemas seit der vorherigen Runde geändert",
+    "cache_miss_history": "Präfix des Nachrichtenverlaufs geändert oder gekürzt",
+    "cache_miss_ttl": "Cache abgelaufen (länger als {minutes} Min. inaktiv)",
+    "cache_miss_initial": "Erste Prompt-Cache-Erstellung",
+    "cache_miss_unknown": "Cache neu aufgebaut, Ursache aus den erfassten Runden nicht bestimmbar",
+    "cache_miss_pending": "Vorherige Runde wird zur Ursachenermittlung analysiert…"
   },
   "ru": {
     "title": "claude-tap",
@@ -781,6 +837,14 @@
     "diff_sys_new": "Текущий",
     "diff_fallback_warning": "Точное совпадение потока не найдено — показан ближайший запрос той же модели",
     "diff_select_target": "Сравнить с:",
-    "diff_select_auto": "Авто"
+    "diff_select_auto": "Авто",
+    "cache_diag_title": "Диагностика кэша:",
+    "cache_miss_system": "Системный промпт изменен с предыдущего шага",
+    "cache_miss_tools": "Схемы инструментов изменены с предыдущего шага",
+    "cache_miss_history": "Префикс истории сообщений изменен или усечен",
+    "cache_miss_ttl": "Кэш истек (простой более {minutes} мин)",
+    "cache_miss_initial": "Начальное создание кэша промпта",
+    "cache_miss_unknown": "Кэш пересоздан, причину невозможно определить по записанным шагам",
+    "cache_miss_pending": "Анализируется предыдущий шаг для определения причины…"
   }
 }

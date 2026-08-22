@@ -1002,6 +1002,56 @@ def _bedrock_converse_record() -> dict[str, Any]:
     }
 
 
+def _cache_diag_record(
+    *,
+    request_id: str,
+    turn: int,
+    timestamp: str,
+    usage: dict[str, Any],
+    system: str = "You are a helpful assistant.",
+    tools: tuple[str, ...] = ("Read",),
+    messages: tuple[dict[str, Any], ...] = ({"role": "user", "content": "hello"},),
+    session_id: str = "sess-cache-diag",
+    ttl: str | None = None,
+) -> dict[str, Any]:
+    """Build a cache-diagnostics turn shaped like a real Claude Code request.
+
+    The system prompt carries a ``cache_control`` breakpoint because that is what
+    the viewer reads to learn which prompt segments are cached and which TTL tier
+    applies; a body without one describes a request that never asked to cache.
+    """
+    control: dict[str, Any] = {"type": "ephemeral"}
+    if ttl is not None:
+        control["ttl"] = ttl
+    return {
+        "timestamp": timestamp,
+        "request_id": request_id,
+        "turn": turn,
+        "capture_turn": turn,
+        "duration_ms": 900,
+        "request": {
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {"X-Claude-Code-Session-Id": session_id},
+            "body": {
+                "model": "claude-opus-5",
+                "system": [{"type": "text", "text": system, "cache_control": control}],
+                "tools": [{"name": name, "input_schema": {"type": "object"}} for name in tools],
+                "messages": list(messages),
+            },
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": usage,
+            },
+        },
+    }
+
+
 def _contract_cases() -> tuple[ViewerContractCase, ...]:
     return (
         ViewerContractCase(
@@ -1175,6 +1225,95 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                 "Tool result two.",
                 "Content block response OK.",
             ),
+        ),
+        # One turn per cache-miss cause the viewer can report, so the card's markup
+        # and both its styling variants stay inside the corpus that drives viewer
+        # JS/CSS coverage.  Every record declares a cache_control breakpoint, which
+        # is what the diagnosis reads to bound the cached region.
+        ViewerContractCase(
+            name="cache_diagnostic_card",
+            records=(
+                # Turn 1 — nothing earlier held a cache, so this turn created it.
+                _cache_diag_record(
+                    request_id="req_cache_diag_cold",
+                    turn=1,
+                    timestamp="2026-08-14T10:00:00.000Z",
+                    usage={
+                        "input_tokens": 12,
+                        "output_tokens": 40,
+                        "cache_creation_input_tokens": 35115,
+                        "cache_read_input_tokens": 0,
+                    },
+                ),
+                # Turn 2 — unchanged prompt after a gap far longer than the 5-minute
+                # tier: expiry is the only remaining explanation.
+                _cache_diag_record(
+                    request_id="req_cache_diag_ttl",
+                    turn=2,
+                    timestamp="2026-08-14T12:30:00.000Z",
+                    usage={
+                        "input_tokens": 14,
+                        "output_tokens": 22,
+                        "cache_creation_input_tokens": 35580,
+                        "cache_read_input_tokens": 0,
+                    },
+                ),
+                # Turn 3 — a tool gained a field while every tool name stayed the
+                # same, which only a full-definition comparison catches.
+                _cache_diag_record(
+                    request_id="req_cache_diag_tools",
+                    turn=3,
+                    timestamp="2026-08-14T12:31:00.000Z",
+                    usage={
+                        "input_tokens": 15,
+                        "output_tokens": 20,
+                        "cache_creation_input_tokens": 35600,
+                        "cache_read_input_tokens": 0,
+                    },
+                    tools=("Read", "Write"),
+                ),
+                # Turn 4 — the system prompt itself changed.
+                _cache_diag_record(
+                    request_id="req_cache_diag_system",
+                    turn=4,
+                    timestamp="2026-08-14T12:32:00.000Z",
+                    usage={
+                        "input_tokens": 16,
+                        "output_tokens": 21,
+                        "cache_creation_input_tokens": 35620,
+                        "cache_read_input_tokens": 0,
+                    },
+                    system="You are a terse assistant.",
+                    tools=("Read", "Write"),
+                ),
+                # Turn 5 — cold write with an unchanged prompt and a sub-TTL gap: no
+                # cause is identifiable, so the card renders low-confidence.
+                _cache_diag_record(
+                    request_id="req_cache_diag_unknown",
+                    turn=5,
+                    timestamp="2026-08-14T12:32:30.000Z",
+                    usage={
+                        "input_tokens": 14,
+                        "output_tokens": 18,
+                        "cache_creation_input_tokens": 35590,
+                        "cache_read_input_tokens": 0,
+                    },
+                    system="You are a terse assistant.",
+                    tools=("Read", "Write"),
+                ),
+            ),
+            expected_sections=("Tools", "System Prompt", "Messages", "Response"),
+            expected_system="You are a helpful assistant.",
+            expected_roles=("user",),
+            expected_tools=("Read",),
+            expected_output_types=("text",),
+            expected_usage={
+                "input_tokens": 12,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 35115,
+                "cache_read_input_tokens": 0,
+            },
+            required_detail_text=("Cache Diagnostic:", "Initial prompt cache creation"),
         ),
     )
 
@@ -3482,3 +3621,96 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
+
+
+def test_viewer_cache_diagnostic_card_reflects_real_incremental_cache_writes(tmp_path: Path, chromium_browser) -> None:
+    """The card must stay hidden while the cache is being extended incrementally.
+
+    Modeled on a captured claude-cli/2.1.233 session where 57 of 64 cache-bearing
+    turns reported cache_creation together with cache_read.  Treating those as
+    invalidations would put a warning on nearly every healthy turn.
+    """
+    records = (
+        # Turn 1 — genuinely cold: a write with no read.
+        _cache_diag_record(
+            request_id="req_cold",
+            turn=1,
+            timestamp="2026-08-14T10:00:00.000Z",
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 35115,
+                "cache_read_input_tokens": 0,
+            },
+        ),
+        # Turn 2 — incremental extension: small write alongside a large read.
+        _cache_diag_record(
+            request_id="req_extend",
+            turn=2,
+            timestamp="2026-08-14T10:00:30.000Z",
+            messages=(
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"},
+            ),
+            usage={
+                "input_tokens": 9,
+                "output_tokens": 55,
+                "cache_creation_input_tokens": 718,
+                "cache_read_input_tokens": 34905,
+            },
+        ),
+        # Turn 3 — cold write after the system prompt changed.
+        _cache_diag_record(
+            request_id="req_system_changed",
+            turn=3,
+            timestamp="2026-08-14T10:01:00.000Z",
+            system="You are a helpful assistant. Be terse.",
+            messages=(
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "sure"},
+                {"role": "user", "content": "again"},
+            ),
+            usage={
+                "input_tokens": 20,
+                "output_tokens": 30,
+                "cache_creation_input_tokens": 35580,
+                "cache_read_input_tokens": 0,
+            },
+        ),
+    )
+    html_path = _generate_case_html(tmp_path, "cache_diagnostics", records)
+
+    page = chromium_browser.new_page()
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+
+        observed = {}
+        for index in range(len(records)):
+            page.locator(f'.sidebar-item[data-idx="{index}"]').click()
+            page.wait_for_selector("#detail .token-bar", timeout=5000)
+            state = page.evaluate(
+                """() => {
+                  const card = document.querySelector('#detail .cache-diag-card');
+                  return {
+                    requestId: currentDetailRequestId,
+                    card: card ? {
+                      reason: card.dataset.reason,
+                      text: card.querySelector('.cache-diag-desc')?.textContent || '',
+                    } : null,
+                  };
+                }"""
+            )
+            observed[state["requestId"]] = state["card"]
+    finally:
+        page.close()
+
+    assert errors == []
+    assert observed["req_cold"] is not None
+    assert observed["req_cold"]["reason"] == "cache_miss_initial"
+    assert observed["req_extend"] is None, "incremental cache extension must not raise a diagnostic"
+    assert observed["req_system_changed"] is not None
+    assert observed["req_system_changed"]["reason"] == "cache_miss_system"
+    assert "{minutes}" not in observed["req_cold"]["text"]
